@@ -1,0 +1,30 @@
+name: Viral Clipper v2 Check
+
+on:
+  push:
+    branches:
+      - viral-clipper-v2
+    paths:
+      - "viral_clipper_v2/**"
+      - ".github/workflows/viral-clipper-v2-check.yml"
+  pull_request:
+    paths:
+      - "viral_clipper_v2/**"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: viral_clipper_v2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Python syntax check
+        run: python -m py_compile app/main.py
+      - name: Docker Compose validation
+        run: docker compose config
+      - name: Docker build
+        run: docker build -t viral-clipper-v2 .
