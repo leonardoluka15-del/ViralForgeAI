@@ -425,7 +425,7 @@ def _commons_license_ok(name: str) -> bool:
 def _commons_search_videos(query: str, limit: int = 12):
     params={
         "action":"query","format":"json","generator":"search",
-        "gsrsearch":query,"gsrnamespace":6,"gsrlimit":max(1,min(limit,25)),
+        "gsrsearch":f"filetype:video {query}","gsrnamespace":6,"gsrlimit":max(5,min(limit*3,50)),
         "prop":"imageinfo",
         "iiprop":"url|mime|size|extmetadata"
     }
@@ -462,7 +462,8 @@ def _commons_search_videos(query: str, limit: int = 12):
             "mime":mime,
             "commons_page":ii.get("descriptionurl")
         })
-    return rows
+    rows.sort(key=lambda x: (x.get("size") or 10**12))
+    return rows[:max(1,min(limit,25))]
 
 @app.get('/api/free-source/search')
 def api_free_source_search(q: str = "nature", limit: int = 12):
