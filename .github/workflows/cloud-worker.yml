@@ -1,9 +1,19 @@
 name: ViralForge Cloud Clip Worker
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "cloud_worker.py"
+      - ".github/workflows/cloud-worker.yml"
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "0 16 * * *"
+    - cron: "0 21 * * *"
+    - cron: "30 0 * * *"
+
+permissions:
+  contents: read
 
 jobs:
   clip:
