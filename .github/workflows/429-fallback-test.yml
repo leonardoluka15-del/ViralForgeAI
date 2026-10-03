@@ -1,0 +1,82 @@
+name: ViralForge 429 Fallback Test
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/429-fallback-test.yml"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Get OIDC token
+        id: oidc
+        shell: bash
+        run: |
+          set -euo pipefail
+          OIDC_JSON=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=viralforge-ai")
+          TOKEN=$(echo "$OIDC_JSON" | jq -r '.value')
+          test -n "$TOKEN" && test "$TOKEN" != "null"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Start exact failing Wikimedia URL
+        id: start
+        shell: bash
+        env:
+          TOKEN: ${{ steps.oidc.outputs.token }}
+        run: |
+          set -euo pipefail
+          RESPONSE=$(curl -sS -X POST "https://viralforge-ai-jwuo.onrender.com/api/free-source/process"             -H "Authorization: Bearer $TOKEN"             -H "Content-Type: application/json"             --data-binary @- <<'JSON'
+          {
+            "source_url": "https://upload.wikimedia.org/wikipedia/commons/4/49/Avoid_NPP_situations_at_all_costs%21_-_Clarissa_Explains_It_All_-_-shorts.webm?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+            "title": "Clarissa trend fallback test",
+            "license": "Creative Commons",
+            "credit": "Wikimedia Commons",
+            "target_length": 15
+          }
+          JSON
+          )
+          echo "$RESPONSE"
+          QID=$(echo "$RESPONSE" | jq -r '.queue_id')
+          test -n "$QID" && test "$QID" != "null"
+          echo "qid=$QID" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for result
+        shell: bash
+        env:
+          QID: ${{ steps.start.outputs.qid }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 80); do
+            ITEM=$(curl -sS "https://viralforge-ai-jwuo.onrender.com/api/queue" | jq -c --arg id "$QID" '.items[]? | select(.id==$id)')
+            STATUS=$(echo "$ITEM" | jq -r '.status // "missing"')
+            echo "poll=$i status=$STATUS item=$ITEM"
+            if [ "$STATUS" = "video_ready" ] || [ "$STATUS" = "uploaded_private" ]; then
+              echo "$ITEM" | jq -e '.media_url != null'
+              exit 0
+            fi
+            if [ "$STATUS" = "error" ]; then
+              echo "$ITEM"
+              exit 1
+            fi
+            sleep 15
+          done
+          exit 1
+
+      - name: Verify MP4 download
+        shell: bash
+        env:
+          QID: ${{ steps.start.outputs.qid }}
+        run: |
+          set -euo pipefail
+          curl -fL "https://viralforge-ai-jwuo.onrender.com/api/queue/$QID/download" -o clip.mp4
+          BYTES=$(wc -c < clip.mp4)
+          echo "downloaded_bytes=$BYTES"
+          test "$BYTES" -gt 10000
+          echo "SUCCESS: 429 fallback produced a downloadable MP4."
