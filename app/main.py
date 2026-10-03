@@ -2,7 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPExcept
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
-import uuid, shutil, threading, urllib.parse, os, secrets
+import uuid, shutil, threading, urllib.parse, urllib.request, os, secrets, subprocess, re
 from datetime import datetime, timezone
 import yt_dlp
 from google_auth_oauthlib.flow import Flow
@@ -169,6 +169,7 @@ def youtube_trends(region: str = 'US', max_results: int = 24):
             rows.append({
                 'video_id': item.get('id'),
                 'title': title,
+                'description': (sn.get('description') or '')[:1200],
                 'channel': sn.get('channelTitle'),
                 'published_at': published,
                 'age_hours': round(age_hours,1),
@@ -252,6 +253,121 @@ async def queue_from_trend(
         content_queue.insert(0,item)
         del content_queue[50:]
     return item
+
+def _queue_lookup(queue_id):
+    return next((x for x in content_queue if x.get('id') == queue_id), None)
+
+def _safe_text(s, limit=220):
+    s = re.sub(r'\\s+', ' ', (s or '')).strip()
+    s = re.sub(r'https?://\\S+', '', s)
+    return s[:limit].strip()
+
+def _make_trend_script(item, source_description=''):
+    title = _safe_text(item.get('source_title'), 120)
+    channel = _safe_text(item.get('source_channel') or 'a YouTube channel', 80)
+    desc = _safe_text(source_description, 260)
+    vph = int(item.get('views_per_hour') or 0)
+    parts = [
+        item.get('hook') or f"This is trending fast: {title}.",
+        f"The video comes from {channel} and is currently gaining about {vph:,} views per hour."
+    ]
+    if desc:
+        parts.append(f"According to the video's description: {desc}")
+    parts.append("That momentum is why this topic is showing up in ViralForge Trend Scout right now.")
+    return ' '.join(parts)
+
+def _write_simple_srt(path, script, duration):
+    words = script.split()
+    chunks = [' '.join(words[i:i+7]) for i in range(0,len(words),7)] or [script]
+    def ts(sec):
+        ms=max(0,int(sec*1000)); h,ms=divmod(ms,3600000); m,ms=divmod(ms,60000); s,ms=divmod(ms,1000)
+        return f"{h:02}:{m:02}:{s:02},{ms:03}"
+    rows=[]; step=max(duration/max(len(chunks),1),0.8)
+    for i,ch in enumerate(chunks,1):
+        a=(i-1)*step; b=min(duration,i*step)
+        rows += [str(i), f"{ts(a)} --> {ts(b)}", ch.upper(), '']
+    path.write_text('\\n'.join(rows), encoding='utf-8')
+
+def _run_trend_generation(queue_id):
+    with lock:
+        item = _queue_lookup(queue_id)
+        if not item:
+            return
+        item['status'] = 'generating'
+    outdir = OUTPUTS / f"trend_{queue_id}"
+    outdir.mkdir(parents=True, exist_ok=True)
+    try:
+        yt = build('youtube','v3',credentials=youtube_credentials(),cache_discovery=False)
+        meta = yt.videos().list(part='snippet', id=item['source_video_id']).execute()
+        sn = (meta.get('items') or [{}])[0].get('snippet',{})
+        description = sn.get('description') or ''
+        thumb = ((sn.get('thumbnails') or {}).get('maxres') or (sn.get('thumbnails') or {}).get('high') or (sn.get('thumbnails') or {}).get('medium') or {}).get('url')
+        if not thumb:
+            raise RuntimeError('No usable thumbnail was available for this trend.')
+
+        image_path = outdir / 'source_thumb.jpg'
+        urllib.request.urlretrieve(thumb, image_path)
+
+        script = _make_trend_script(item, description)
+        audio_path = outdir / 'narration.mp3'
+        tts = subprocess.run(
+            ['edge-tts','--voice','en-US-AriaNeural','--text',script,'--write-media',str(audio_path)],
+            capture_output=True, text=True, timeout=90
+        )
+        if tts.returncode != 0:
+            raise RuntimeError((tts.stderr or tts.stdout or 'Text-to-speech failed')[-500:])
+
+        probe = subprocess.run(
+            ['ffprobe','-v','error','-show_entries','format=duration','-of','default=nw=1:nk=1',str(audio_path)],
+            capture_output=True,text=True,timeout=30
+        )
+        dur=max(float((probe.stdout or '20').strip()),6.0)
+        srt_path=outdir/'captions.srt'
+        _write_simple_srt(srt_path,script,dur)
+
+        final_path=outdir/'trend_short.mp4'
+        vf = (
+            "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,"
+            "boxblur=18:10,"
+            "drawbox=x=0:y=0:w=iw:h=ih:color=black@0.32:t=fill,"
+            f"subtitles='{str(srt_path).replace(':','\\:').replace(chr(92),'/')}':"
+            "force_style='FontName=Arial,FontSize=18,Bold=1,PrimaryColour=&H00FFFFFF,"
+            "OutlineColour=&H00000000,BorderStyle=1,Outline=3,Alignment=2,MarginV=150'"
+        )
+        ff = subprocess.run(
+            ['ffmpeg','-y','-loop','1','-i',str(image_path),'-i',str(audio_path),
+             '-t',f'{dur:.2f}','-vf',vf,'-r','30','-c:v','libx264','-preset','veryfast',
+             '-crf','23','-c:a','aac','-b:a','128k','-shortest','-movflags','+faststart',str(final_path)],
+            capture_output=True,text=True,timeout=180
+        )
+        if ff.returncode != 0:
+            raise RuntimeError((ff.stderr or ff.stdout or 'FFmpeg failed')[-900:])
+
+        with lock:
+            item = _queue_lookup(queue_id)
+            if item:
+                item['status']='video_ready'
+                item['script']=script
+                item['media_url']=f"/media/trend_{queue_id}/trend_short.mp4"
+    except Exception as e:
+        with lock:
+            item = _queue_lookup(queue_id)
+            if item:
+                item['status']='error'
+                item['error']=str(e)[:500]
+
+@app.post('/api/queue/{queue_id}/generate')
+def generate_queue_video(queue_id: str, background_tasks: BackgroundTasks):
+    with lock:
+        item = _queue_lookup(queue_id)
+        if not item:
+            raise HTTPException(404,'Queue item not found.')
+        if item.get('status') == 'generating':
+            return {'ok':True,'status':'generating'}
+        item['status']='queued_for_generation'
+        item.pop('error',None)
+    background_tasks.add_task(_run_trend_generation, queue_id)
+    return {'ok':True,'status':'queued_for_generation'}
 
 @app.get('/api/queue')
 def get_queue():
