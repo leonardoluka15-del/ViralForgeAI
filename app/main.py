@@ -505,7 +505,7 @@ def _process_direct_source(queue_id: str):
             if item:
                 item["status"]="ai_clipping"
         result=process_video(
-            str(src), str(outdir),
+            src, outdir,
             lambda p,m: None,
             clip_length=target_length,
             max_clips=1
