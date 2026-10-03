@@ -1082,6 +1082,30 @@ def worker_progress(job_id: str):
 def worker_complete(job_id: str):
     raise HTTPException(410,'Legacy cloud worker is disabled.')
 
+@app.get('/api/queue/{queue_id}/download')
+def download_queue_clip(queue_id: str):
+    with lock:
+        item=_queue_lookup(queue_id)
+        if not item:
+            raise HTTPException(404,"Queue item not found.")
+        media_url=(item.get("media_url") or "").strip()
+        title=item.get("title") or item.get("source_title") or "viralforge_short"
+    if not media_url.startswith("/media/"):
+        raise HTTPException(404,"This queue item does not have a finished local MP4 yet.")
+    rel=media_url.replace("/media/","",1)
+    path=(OUTPUTS / rel).resolve()
+    if not path.exists() or OUTPUTS.resolve() not in path.parents:
+        raise HTTPException(404,"Rendered MP4 is no longer available on this instance.")
+    safe=re.sub(r'[^A-Za-z0-9._ -]+','_',title).strip()[:80] or 'viralforge_short'
+    if not safe.lower().endswith('.mp4'):
+        safe += '.mp4'
+    return FileResponse(
+        path,
+        media_type='video/mp4',
+        filename=safe,
+        headers={"Content-Disposition":f'attachment; filename="{safe}"'}
+    )
+
 @app.get('/api/queue')
 def get_queue():
     with lock:
