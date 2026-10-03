@@ -328,36 +328,23 @@ def _run_trend_generation(queue_id):
         final_path=outdir/'trend_short.mp4'
         base_path = outdir/'trend_short_base.mp4'
         base_vf = (
-            "scale=720:1280:force_original_aspect_ratio=increase,"
-            "crop=720:1280,"
-            "boxblur=18:10,"
-            "drawbox=x=0:y=0:w=iw:h=ih:color=black@0.32:t=fill"
+            "scale=540:960:force_original_aspect_ratio=increase,"
+            "crop=540:960,"
+            "drawbox=x=0:y=0:w=iw:h=ih:color=black@0.18:t=fill"
         )
         ff = subprocess.run(
             ['ffmpeg','-y','-loop','1','-i',str(image_path),'-i',str(audio_path),
-             '-t',f'{dur:.2f}','-vf',base_vf,'-r','30','-c:v','libx264','-preset','veryfast',
-             '-crf','23','-c:a','aac','-b:a','128k','-shortest','-movflags','+faststart',str(base_path)],
+             '-t',f'{dur:.2f}','-vf',base_vf,'-r','24','-threads','1',
+             '-c:v','libx264','-preset','ultrafast','-crf','26',
+             '-c:a','aac','-b:a','96k','-shortest','-movflags','+faststart',str(base_path)],
             capture_output=True,text=True,timeout=180
         )
         if ff.returncode != 0:
             raise RuntimeError((ff.stderr or ff.stdout or 'Base FFmpeg render failed')[-1200:])
 
-        # Burn captions as a second pass. If libass/font rendering fails on the host,
-        # preserve the base narrated Short instead of failing the whole job.
-        srt_ffmpeg = str(srt_path).replace('\\','/')
-        caption_vf = (
-            f"subtitles={srt_ffmpeg}:"
-            "force_style='FontName=Arial,FontSize=18,Bold=1,PrimaryColour=&H00FFFFFF,"
-            "OutlineColour=&H00000000,BorderStyle=1,Outline=3,Alignment=2,MarginV=150'"
-        )
-        cap = subprocess.run(
-            ['ffmpeg','-y','-i',str(base_path),'-vf',caption_vf,
-             '-c:v','libx264','-preset','veryfast','-crf','23',
-             '-c:a','copy','-movflags','+faststart',str(final_path)],
-            capture_output=True,text=True,timeout=180
-        )
-        if cap.returncode != 0:
-            shutil.copyfile(base_path, final_path)
+        # Keep the low-memory narrated base video as the final Short.
+        # Caption SRT is still generated and can be burned in by a separate low-priority pass later.
+        shutil.copyfile(base_path, final_path)
 
         with lock:
             item = _queue_lookup(queue_id)
