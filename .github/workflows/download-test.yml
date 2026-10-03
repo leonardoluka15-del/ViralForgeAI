@@ -1,0 +1,82 @@
+name: ViralForge Download Verification
+
+on:
+  push:
+    paths:
+      - ".github/workflows/download-test.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Get OIDC token
+        id: oidc
+        shell: bash
+        run: |
+          set -euo pipefail
+          OIDC_JSON=$(curl -sS             -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN"             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=viralforge-ai")
+          TOKEN=$(echo "$OIDC_JSON" | jq -r '.value')
+          test -n "$TOKEN" && test "$TOKEN" != "null"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Start real clip job
+        id: start
+        shell: bash
+        env:
+          TOKEN: ${{ steps.oidc.outputs.token }}
+        run: |
+          set -euo pipefail
+          RESPONSE=$(curl -sS -X POST "https://viralforge-ai-jwuo.onrender.com/api/free-source/process"             -H "Authorization: Bearer $TOKEN"             -H "Content-Type: application/json"             --data-binary @- <<'JSON'
+          {
+            "source_url": "https://upload.wikimedia.org/wikipedia/commons/a/a6/PIO06_Ovcarsko-Kablarska_Klisura.webm",
+            "title": "ViralForge Download Test",
+            "license": "CC BY-SA 4.0",
+            "credit": "Wikimedia Commons",
+            "target_length": 15
+          }
+          JSON
+          )
+          echo "$RESPONSE"
+          QID=$(echo "$RESPONSE" | jq -r '.queue_id')
+          test -n "$QID" && test "$QID" != "null"
+          echo "qid=$QID" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for clip
+        shell: bash
+        env:
+          QID: ${{ steps.start.outputs.qid }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 70); do
+            ITEM=$(curl -sS "https://viralforge-ai-jwuo.onrender.com/api/queue" | jq -c --arg id "$QID" '.items[]? | select(.id==$id)')
+            STATUS=$(echo "$ITEM" | jq -r '.status // "missing"')
+            echo "poll=$i status=$STATUS"
+            if [ "$STATUS" = "video_ready" ] || [ "$STATUS" = "uploaded_private" ]; then
+              exit 0
+            fi
+            if [ "$STATUS" = "error" ]; then
+              echo "$ITEM"
+              exit 1
+            fi
+            sleep 15
+          done
+          exit 1
+
+      - name: Verify direct MP4 download
+        shell: bash
+        env:
+          QID: ${{ steps.start.outputs.qid }}
+        run: |
+          set -euo pipefail
+          curl -fL "https://viralforge-ai-jwuo.onrender.com/api/queue/$QID/download" -o clip.mp4
+          BYTES=$(wc -c < clip.mp4)
+          echo "downloaded_bytes=$BYTES"
+          test "$BYTES" -gt 10000
+          ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 clip.mp4
+          echo "SUCCESS: generated clip downloads as a real MP4."
