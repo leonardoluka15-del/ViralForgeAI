@@ -421,6 +421,8 @@ def _auto_pick_trend():
 
 
 def cloud_clip_provider_status():
+    if os.getenv("OPUSCLIP_API_KEY"):
+        return {"provider":"opusclip","configured":True}
     if os.getenv("KLAP_API_KEY"):
         return {"provider":"klap","configured":True}
     if os.getenv("VIZARD_API_KEY"):
@@ -431,6 +433,33 @@ def _queue_cloud_clip(job):
     provider=cloud_clip_provider_status()
     if not provider["configured"]:
         return None
+    if provider["provider"]=="opusclip":
+        headers={
+            "Authorization":f"Bearer {os.environ['OPUSCLIP_API_KEY']}",
+            "Content-Type":"application/json"
+        }
+        payload={
+            "videoUrl":job["source_url"],
+            "uploadedVideoAttr":{
+                "title":job.get("source_title") or "ViralForge"
+            },
+            "curationPref":{
+                "model":"ClipAnything",
+                "clipDurations":[[15,45]],
+                "genre":"Auto",
+                "customPrompt":"Select the strongest self-contained viral moment with a clear hook and payoff.",
+                "enableAutoHook":True
+            },
+            "importPref":{"sourceLang":"auto"}
+        }
+        r=requests.post(
+            "https://api.opus.pro/api/clip-projects",
+            headers=headers,json=payload,timeout=60
+        )
+        r.raise_for_status()
+        data=r.json()
+        project_id=data.get("projectId") or data.get("id") or data.get("project",{}).get("id")
+        return {"provider":"opusclip","project_id":project_id,"task":data}
     if provider["provider"]=="klap":
         headers={"Authorization":f"Bearer {os.environ['KLAP_API_KEY']}","Content-Type":"application/json"}
         payload={
@@ -494,6 +523,40 @@ def api_source_direct(payload: dict):
     with lock:
         content_queue.insert(0,item)
     return {'ok':True,'queue_id':qid,'status':'idea_ready'}
+
+
+@app.get('/api/cloud-provider/opusclip/{project_id}')
+def api_opusclip_project(project_id: str):
+    key=os.getenv("OPUSCLIP_API_KEY")
+    if not key:
+        raise HTTPException(503,"OPUSCLIP_API_KEY is not configured")
+    headers={"Authorization":f"Bearer {key}"}
+    org_id=os.getenv("OPUSCLIP_ORG_ID")
+    if org_id:
+        headers["x-opus-org-id"]=org_id
+    r=requests.get(
+        "https://api.opus.pro/api/exportable-clips",
+        headers=headers,
+        params={"q":"findByProjectId","projectId":project_id,"pageNum":1,"pageSize":10},
+        timeout=45
+    )
+    r.raise_for_status()
+    clips=r.json()
+    if isinstance(clips,dict):
+        clips=clips.get("items") or clips.get("data") or clips.get("clips") or []
+    ready=[]
+    for clip in clips or []:
+        ready.append({
+            "id":clip.get("id"),
+            "projectId":clip.get("projectId"),
+            "title":clip.get("title"),
+            "description":clip.get("description"),
+            "hashtags":clip.get("hashtags"),
+            "durationMs":clip.get("durationMs"),
+            "uriForPreview":clip.get("uriForPreview"),
+            "uriForExport":clip.get("uriForExport")
+        })
+    return {"project_id":project_id,"ready":bool(ready),"clips":ready}
 
 @app.post('/api/cloud-provider/dispatch')
 def api_cloud_provider_dispatch(payload: dict):
