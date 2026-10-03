@@ -326,11 +326,12 @@ def _run_trend_generation(queue_id):
         _write_simple_srt(srt_path,script,dur)
 
         final_path=outdir/'trend_short.mp4'
+        srt_ffmpeg = str(srt_path).replace('\\','/').replace(':','\\:')
         vf = (
             "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,"
             "boxblur=18:10,"
             "drawbox=x=0:y=0:w=iw:h=ih:color=black@0.32:t=fill,"
-            f"subtitles='{str(srt_path).replace(':','\\:').replace(chr(92),'/')}':"
+            f"subtitles='{srt_ffmpeg}':"
             "force_style='FontName=Arial,FontSize=18,Bold=1,PrimaryColour=&H00FFFFFF,"
             "OutlineColour=&H00000000,BorderStyle=1,Outline=3,Alignment=2,MarginV=150'"
         )
