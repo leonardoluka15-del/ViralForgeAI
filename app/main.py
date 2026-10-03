@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
@@ -28,7 +28,7 @@ def health():
     return {'ok': True, 'service': 'ViralForge AI'}
 
 @app.post('/api/jobs')
-async def create_job(background_tasks: BackgroundTasks, video: UploadFile = File(...), clip_length: int = 35):
+async def create_job(background_tasks: BackgroundTasks, video: UploadFile = File(...), clip_length: int = Form(35)):
     ext = Path(video.filename or 'video.mp4').suffix.lower()
     if ext not in {'.mp4','.mov','.mkv','.webm','.avi','.m4v'}:
         raise HTTPException(400, 'Unsupported video type.')
