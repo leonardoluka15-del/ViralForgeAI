@@ -78,7 +78,10 @@ async function loadQueue(){
   try{
     const r=await fetch('/api/queue');
     const raw=await r.text(); let j;
-    try{j=JSON.parse(raw)}catch(_){throw Error('The Render worker restarted while generating. Please wait a few seconds and refresh the queue.')}
+    try{j=JSON.parse(raw)}catch(_){
+      queueGrid.innerHTML='';
+      throw Error('ViralForge is restarting or busy. Refresh the queue in a few seconds.')
+    }
     if(!r.ok)throw Error(j.detail||'Queue request failed');
     queueStatus.textContent=(j.count||0)+' queued Short idea'+((j.count||0)===1?'':'s');
     queueGrid.innerHTML=(j.items||[]).map(q=>`<article class="queue-card">
@@ -111,9 +114,10 @@ async function generateQueue(id){
       await loadQueue();
       const rr=await fetch('/api/queue'); const qq=await rr.json();
       const item=(qq.items||[]).find(x=>x.id===id);
-      if(!item||['video_ready','error'].includes(item.status)){
+      if(!item||['video_ready','uploaded_private','error','source_unavailable'].includes(item.status)){
         clearInterval(timer);
         if(item?.status==='error') alert(item.error||'Generation failed');
+        if(item?.status==='source_unavailable') alert(item.error||'Real source footage is unavailable for this queue item.');
       }
     },3000);
   }catch(e){alert(e.message)}
