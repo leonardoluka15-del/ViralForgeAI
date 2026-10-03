@@ -71,7 +71,7 @@ def transcribe(src, update):
         except Exception:
             pass
 
-def visual_energy(src, update):
+def visual_energy(src, update, max_seconds=None):
     update(33, 'Detecting motion, cuts and visual peaks…')
     # Ask ffmpeg for a tiny grayscale frame every ~2 seconds, avoiding
     # full-resolution decode buffers inside Python/OpenCV.
@@ -79,11 +79,14 @@ def visual_energy(src, update):
     td = Path(tempfile.mkdtemp(prefix='vf_frames_'))
     pattern = td / 'f_%05d.pgm'
     try:
-        run([
-            'ffmpeg','-y','-i',str(src),
+        cmd=['ffmpeg','-y','-i',str(src)]
+        if max_seconds:
+            cmd += ['-t',f'{float(max_seconds):.3f}']
+        cmd += [
             '-vf','fps=1/2,scale=160:90,format=gray',
             '-vsync','vfr',str(pattern)
-        ])
+        ]
+        run(cmd)
         scores=[]; prev=None
         frames=sorted(td.glob('f_*.pgm'))
         for idx,fp in enumerate(frames):
@@ -207,7 +210,7 @@ def process_video(src,outdir,update,clip_length=35,max_clips=6,skip_transcriptio
         segs=[]
     else:
         segs=transcribe(src,update)
-    vis=visual_energy(src,update)
+    vis=visual_energy(src,update,max_seconds=min(total,90) if skip_transcription else None)
     update(53,'AI is scoring hooks, pacing and visual energy…')
     picks=rank(candidates(total,segs,clip_length),vis)[:max(1,int(max_clips))]
     if not picks:
