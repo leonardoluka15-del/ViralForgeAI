@@ -373,10 +373,55 @@ def generate_queue_video(queue_id: str, background_tasks: BackgroundTasks):
     background_tasks.add_task(_run_trend_generation, queue_id)
     return {'ok':True,'status':'queued_for_generation'}
 
+def _auto_pick_trend():
+    yt = build('youtube','v3',credentials=youtube_credentials(),cache_discovery=False)
+    now = datetime.now(timezone.utc)
+    candidates = []
+    for category_id in ['1','20','23','24']:
+        try:
+            resp = yt.videos().list(
+                part='snippet,statistics',
+                chart='mostPopular',
+                regionCode='US',
+                videoCategoryId=category_id,
+                maxResults=12
+            ).execute()
+        except Exception:
+            continue
+        for item in resp.get('items',[]):
+            sn=item.get('snippet',{}); st=item.get('statistics',{})
+            published=sn.get('publishedAt')
+            try:
+                dt=datetime.fromisoformat(published.replace('Z','+00:00'))
+                age=max((now-dt).total_seconds()/3600,0.5)
+            except Exception:
+                age=48.0
+            if age > 96:
+                continue
+            views=int(st.get('viewCount') or 0)
+            vph=int(views/age)
+            title=sn.get('title','')
+            boost=1.0
+            low=title.lower()
+            if any(k in low for k in ['official trailer','trailer','teaser','mrbeast','challenge','reveal','announcement']):
+                boost=1.35
+            candidates.append({
+                'video_id':item.get('id'),
+                'title':title,
+                'channel':sn.get('channelTitle') or '',
+                'url':f"https://www.youtube.com/watch?v={item.get('id')}",
+                'views':views,
+                'views_per_hour':vph,
+                'age_hours':round(age,1),
+                'score':vph*boost
+            })
+    candidates.sort(key=lambda x:(x['score'],x['views']),reverse=True)
+    used={x.get('source_video_id') for x in worker_jobs}
+    return next((x for x in candidates if x.get('video_id') not in used), None)
+
 @app.get('/api/worker/next')
 def worker_next():
     with lock:
-        # Prefer explicit worker jobs; otherwise promote the newest idea_ready queue item.
         pending = next((x for x in worker_jobs if x.get('status') == 'pending'), None)
         if pending:
             pending['status'] = 'claimed'
@@ -384,22 +429,45 @@ def worker_next():
             return pending
 
         item = next((x for x in content_queue if x.get('status') in {'idea_ready','queued_for_local_worker'}), None)
-        if not item:
-            return {'job': None}
 
-        item['status'] = 'local_worker_claimed'
-        job = {
-            'id': item['id'],
-            'source_url': item.get('source_url'),
-            'source_video_id': item.get('source_video_id'),
-            'source_title': item.get('source_title'),
-            'source_channel': item.get('source_channel'),
-            'target_length': 30,
-            'status': 'claimed',
-            'claimed_at': datetime.now(timezone.utc).isoformat()
+    if item is None:
+        picked = _auto_pick_trend()
+        if not picked:
+            return {'job': None}
+        qid = 'auto_' + uuid.uuid4().hex[:10]
+        item = {
+            'id': qid,
+            'status': 'cloud_worker_claimed',
+            'source_video_id': picked['video_id'],
+            'source_url': picked['url'],
+            'source_title': picked['title'],
+            'source_channel': picked['channel'],
+            'views': picked['views'],
+            'views_per_hour': picked['views_per_hour'],
+            'trend_score': min(100, int(55 + min(picked['views_per_hour']/10000,45))),
+            'title': (picked['title'][:88] + ' #Shorts')[:100],
+            'description': f"Trending clip from {picked['channel']}. Source: {picked['url']}\n\n#Shorts #Trending",
+            'created_at': datetime.now(timezone.utc).isoformat()
         }
+        with lock:
+            content_queue.insert(0,item)
+    else:
+        with lock:
+            item['status']='cloud_worker_claimed'
+
+    job = {
+        'id': item['id'],
+        'source_url': item.get('source_url'),
+        'source_video_id': item.get('source_video_id'),
+        'source_title': item.get('source_title'),
+        'source_channel': item.get('source_channel'),
+        'target_length': 30,
+        'status': 'claimed',
+        'claimed_at': datetime.now(timezone.utc).isoformat()
+    }
+    with lock:
         worker_jobs.append(job)
-        return job
+    return job
 
 @app.post('/api/worker/{job_id}/progress')
 def worker_progress(job_id: str, status: str = Form(...), message: str = Form('')):
@@ -420,22 +488,46 @@ async def worker_complete(job_id: str, video: UploadFile = File(...)):
         q = _queue_lookup(job_id)
         if not q:
             raise HTTPException(404,'Queue item not found.')
+        meta = dict(q)
+
     outdir = OUTPUTS / f"worker_{job_id}"
     outdir.mkdir(parents=True, exist_ok=True)
     final_path = outdir / 'viral_short.mp4'
     with final_path.open('wb') as f:
         shutil.copyfileobj(video.file, f)
+
+    yt_result = None
+    try:
+        yt = build('youtube','v3',credentials=youtube_credentials(),cache_discovery=False)
+        title = (meta.get('title') or meta.get('source_title') or 'Trending Short')[:100]
+        description = (meta.get('description') or
+            f"Source: {meta.get('source_channel','YouTube')}\n{meta.get('source_url','')}\n\n#Shorts #Trending")
+        body = {
+            'snippet': {'title': title, 'description': description, 'categoryId': '24'},
+            'status': {'privacyStatus': 'public', 'selfDeclaredMadeForKids': False}
+        }
+        media = MediaFileUpload(str(final_path), mimetype='video/mp4', resumable=True, chunksize=8*1024*1024)
+        req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
+        response=None
+        while response is None:
+            _,response=req.next_chunk()
+        yt_result={'video_id':response.get('id'),'youtube_url':f"https://www.youtube.com/watch?v={response.get('id')}"}
+    except Exception as e:
+        yt_result={'error':str(e)[:400]}
+
     with lock:
         q = _queue_lookup(job_id)
         if q:
-            q['status']='video_ready'
+            q['status']='published_youtube' if yt_result and yt_result.get('video_id') else 'video_ready'
             q['media_url']=f"/media/worker_{job_id}/viral_short.mp4"
-            q['worker_message']='Local worker finished the AI clip.'
+            q['worker_message']='Cloud worker finished the AI clip.'
+            q['youtube']=yt_result
         j = next((x for x in worker_jobs if x.get('id') == job_id), None)
         if j:
-            j['status']='video_ready'
+            j['status']='published_youtube' if yt_result and yt_result.get('video_id') else 'video_ready'
             j['media_url']=f"/media/worker_{job_id}/viral_short.mp4"
-    return {'ok': True, 'media_url': f"/media/worker_{job_id}/viral_short.mp4"}
+            j['youtube']=yt_result
+    return {'ok': True, 'media_url': f"/media/worker_{job_id}/viral_short.mp4", 'youtube': yt_result}
 
 @app.get('/api/queue')
 def get_queue():
