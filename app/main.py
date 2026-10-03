@@ -298,7 +298,11 @@ async def queue_from_trend(
                     matched.append(x)
             items=matched
         if items:
-            items.sort(key=lambda x:(0 if (x.get("height") or 0)>=(x.get("width") or 0) else 1,x.get("size") or 10**12))
+            items.sort(key=lambda x:(
+                0 if (x.get("height") or 0)>=(x.get("width") or 0) else 1,
+                -((x.get("width") or 0)*(x.get("height") or 0)),
+                x.get("size") or 10**12
+            ))
             source=items[0]
             used_query=query
             break
