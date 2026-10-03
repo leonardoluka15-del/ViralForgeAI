@@ -474,6 +474,115 @@ def _commons_search_videos(query: str, limit: int = 12):
     rows.sort(key=lambda x: (x.get("size") or 10**12))
     return rows[:max(1,min(limit,25))]
 
+
+def _trend_search_terms(title: str):
+    stop={
+        "official","trailer","teaser","video","clip","shorts","short","new","full",
+        "the","a","an","and","or","of","to","in","on","for","with","from","by",
+        "2026","2027","hd","4k","reaction","live","episode"
+    }
+    words=re.findall(r"[A-Za-z0-9]+",(title or "").lower())
+    clean=[]
+    for w in words:
+        if len(w) < 3 or w in stop or w.isdigit():
+            continue
+        if w not in clean:
+            clean.append(w)
+    return clean[:4]
+
+def _pick_free_source_from_trend():
+    trend=None
+    try:
+        trend=_auto_pick_trend()
+    except Exception:
+        trend=None
+
+    queries=[]
+    if trend:
+        terms=_trend_search_terms(trend.get("title") or "")
+        if terms:
+            queries.append(" ".join(terms))
+            queries.extend(terms[:2])
+
+    # Safe fallback topics keep the autonomous loop alive when a trend has
+    # no useful licensed footage match.
+    fallback=["technology","science","space","nature","travel","city","animals","sports"]
+    slot=int(datetime.now(timezone.utc).strftime("%j")) % len(fallback)
+    queries.extend(fallback[slot:]+fallback[:slot])
+
+    seen=set()
+    for query in queries:
+        query=query.strip()
+        if not query or query in seen:
+            continue
+        seen.add(query)
+        try:
+            items=_commons_search_videos(query,10)
+        except Exception:
+            continue
+        # Stay comfortably below the free Render service's practical limit.
+        items=[x for x in items if (x.get("size") or 0) <= 40*1024*1024]
+        if not items:
+            continue
+        # Prefer vertical/square media, then smallest file.
+        items.sort(key=lambda x: (
+            0 if (x.get("height") or 0) >= (x.get("width") or 0) else 1,
+            x.get("size") or 10**12
+        ))
+        return trend,query,items[0]
+    return trend,None,None
+
+@app.post('/api/automation/run-once')
+def api_automation_run_once(background_tasks: BackgroundTasks, request: Request):
+    _require_automation_secret(request)
+    trend,query,source=_pick_free_source_from_trend()
+    if not source:
+        raise HTTPException(404,"No suitable licensed source video was found.")
+
+    qid="auto_"+uuid.uuid4().hex[:10]
+    item={
+        "id":qid,
+        "status":"queued",
+        "source_url":source["source_url"],
+        "source_title":source["title"],
+        "source_channel":"Wikimedia Commons",
+        "license":source.get("license"),
+        "license_url":source.get("license_url"),
+        "credit":source.get("credit") or source.get("artist"),
+        "target_length":15,
+        "created_at":datetime.now(timezone.utc).isoformat(),
+        "automation":True,
+        "trend_context":{
+            "title":trend.get("title") if trend else None,
+            "channel":trend.get("channel") if trend else None,
+            "views_per_hour":trend.get("views_per_hour") if trend else None,
+            "search_query":query
+        },
+        "source_metadata":{
+            "commons_page":source.get("commons_page"),
+            "description":source.get("description"),
+            "width":source.get("width"),
+            "height":source.get("height"),
+            "size":source.get("size")
+        }
+    }
+    with lock:
+        content_queue.insert(0,item)
+        del content_queue[50:]
+    background_tasks.add_task(_process_direct_source,qid)
+    return {
+        "ok":True,
+        "queue_id":qid,
+        "status":"queued",
+        "trend":item["trend_context"],
+        "source":{
+            "title":source["title"],
+            "license":source.get("license"),
+            "size":source.get("size"),
+            "query":query
+        }
+    }
+
 @app.get('/api/free-source/search')
 def api_free_source_search(q: str = "nature", limit: int = 12):
     q=(q or "nature").strip()[:120]
