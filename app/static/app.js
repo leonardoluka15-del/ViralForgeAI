@@ -39,7 +39,7 @@ async function loadTrends(){
         <h3>${esc(t.title||'Untitled')}</h3>
         <p class="trend-channel">${esc(t.channel||'Unknown channel')}</p>
         <div class="trend-metrics"><span><b>${fmt(t.views)}</b> views</span><span><b>${fmt(t.views_per_hour)}</b>/hr</span><span><b>${t.age_hours}h</b> old</span></div>
-        <a class="trend-open" href="${t.url}" target="_blank" rel="noopener">Open source video ↗</a>
+        <div class="trend-actions"><a class="trend-open" href="${t.url}" target="_blank" rel="noopener">Open source video ↗</a><button class="trend-create" onclick='queueTrend(${JSON.stringify(t)})'>Create Short</button></div>
       </div>
     </article>`).join('');
     trendStatus.textContent=`${j.count||0} current trends ranked by momentum`;
@@ -53,3 +53,48 @@ async function loadTrends(){
 refreshTrends && (refreshTrends.onclick=loadTrends);
 trendRegion && (trendRegion.onchange=loadTrends);
 loadTrends();
+
+async function queueTrend(t){
+  const fd=new FormData();
+  fd.append('video_id',t.video_id||'');
+  fd.append('title',t.title||'');
+  fd.append('channel',t.channel||'');
+  fd.append('views',t.views||0);
+  fd.append('views_per_hour',t.views_per_hour||0);
+  fd.append('trend_score',t.trend_score||0);
+  fd.append('source_url',t.url||'');
+  try{
+    const r=await fetch('/api/queue/from-trend',{method:'POST',body:fd});
+    const raw=await r.text(); let j;
+    try{j=JSON.parse(raw)}catch(_){throw Error(raw||'Could not create Short idea')}
+    if(!r.ok)throw Error(j.detail||'Could not create Short idea');
+    await loadQueue();
+    document.querySelector('#queue')?.scrollIntoView({behavior:'smooth'});
+  }catch(e){alert(e.message)}
+}
+const queueGrid=$('#queue-grid'),queueStatus=$('#queue-status'),refreshQueue=$('#refresh-queue');
+async function loadQueue(){
+  if(!queueGrid||!queueStatus)return;
+  try{
+    const r=await fetch('/api/queue');
+    const j=await r.json();
+    queueStatus.textContent=(j.count||0)+' queued Short idea'+((j.count||0)===1?'':'s');
+    queueGrid.innerHTML=(j.items||[]).map(q=>`<article class="queue-card">
+      <div class="queue-head"><span class="trend-score">✦ ${q.trend_score}/100</span><span class="queue-state">${esc(q.status)}</span></div>
+      <h3>${esc(q.title)}</h3>
+      <p class="queue-hook"><b>Hook:</b> ${esc(q.hook)}</p>
+      <p class="queue-angle"><b>Angle:</b> ${esc(q.angle)}</p>
+      <div class="queue-meta"><span>${fmt(q.views_per_hour)}/hr</span><span>${esc(q.source_channel||'YouTube')}</span></div>
+      <div class="queue-tags">${(q.hashtags||[]).map(h=>'<span>'+esc(h)+'</span>').join('')}</div>
+      <div class="trend-actions"><a class="trend-open" href="${q.source_url}" target="_blank" rel="noopener">View trend ↗</a><button class="queue-remove" onclick="removeQueue('${q.id}')">Remove</button></div>
+    </article>`).join('');
+  }catch(e){
+    queueStatus.textContent='Could not load queue: '+e.message;
+  }
+}
+async function removeQueue(id){
+  await fetch('/api/queue/'+id,{method:'DELETE'});
+  loadQueue();
+}
+refreshQueue && (refreshQueue.onclick=loadQueue);
+loadQueue();
