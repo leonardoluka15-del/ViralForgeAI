@@ -507,7 +507,9 @@ def _trend_search_terms(title: str):
     stop={
         "official","trailer","teaser","video","clip","shorts","short","new","full",
         "the","a","an","and","or","of","to","in","on","for","with","from","by",
-        "2026","2027","hd","4k","reaction","live","episode"
+        "how","what","why","when","where","who","was","were","is","are","been",
+        "filmed","made","making","behind","scene","scenes","reaction","live","episode",
+        "2026","2027","hd","4k"
     }
     words=re.findall(r"[A-Za-z0-9]+",(title or "").lower())
     clean=[]
@@ -526,11 +528,15 @@ def _pick_free_source_from_trend():
         trend=None
 
     queries=[]
+    trend_terms=[]
     if trend:
-        terms=_trend_search_terms(trend.get("title") or "")
-        if terms:
-            queries.append(" ".join(terms))
-            queries.extend(terms[:2])
+        trend_terms=_trend_search_terms(trend.get("title") or "")
+        if trend_terms:
+            queries.append(" ".join(trend_terms[:4]))
+            if len(trend_terms) >= 2:
+                queries.append(" ".join(trend_terms[-2:]))
+            # Single-word fallbacks must be meaningful subject words.
+            queries.extend([w for w in trend_terms if len(w) >= 5])
 
     # Safe fallback topics keep the autonomous loop alive when a trend has
     # no useful licensed footage match.
@@ -553,6 +559,22 @@ def _pick_free_source_from_trend():
         if not items:
             continue
         # Prefer vertical/square media, then smallest file.
+        # For trend-derived searches, require the Commons result itself to
+        # contain at least one meaningful trend term. This prevents accidental
+        # matches on generic wording.
+        if trend_terms and query not in fallback:
+            meaningful={w for w in trend_terms if len(w) >= 4}
+            matched=[]
+            for x in items:
+                hay=(" ".join([
+                    x.get("title") or "",
+                    x.get("description") or ""
+                ])).lower()
+                if any(w in hay for w in meaningful):
+                    matched.append(x)
+            items=matched
+            if not items:
+                continue
         items.sort(key=lambda x: (
             0 if (x.get("height") or 0) >= (x.get("width") or 0) else 1,
             x.get("size") or 10**12
