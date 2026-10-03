@@ -194,12 +194,13 @@ def esc(p):
     return str(p).replace('\\','/').replace(':','\\:').replace("'","\\'")
 
 def export(src,out,start,end,srt):
-    vf="scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280"
+    vf="scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920"
     if srt.exists() and srt.stat().st_size:
         vf += f",subtitles='{esc(srt)}':force_style='FontName=Arial,FontSize=19,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=155'"
     run(['ffmpeg','-y','-ss',f'{start:.3f}','-i',str(src),'-t',f'{end-start:.3f}',
-     '-vf',vf,'-threads','1','-c:v','libx264','-preset','ultrafast','-crf','24',
-     '-c:a','aac','-b:a','96k','-movflags','+faststart',str(out)])
+     '-vf',vf,'-threads','1','-c:v','libx264','-preset','veryfast','-crf','18',
+     '-profile:v','high','-pix_fmt','yuv420p','-c:a','aac','-b:a','160k',
+     '-movflags','+faststart',str(out)])
 
 def process_video(src,outdir,update,clip_length=35,max_clips=6,skip_transcription=False):
     outdir.mkdir(parents=True,exist_ok=True)
