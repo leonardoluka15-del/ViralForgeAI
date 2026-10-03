@@ -36,32 +36,72 @@ def transcribe(src, update):
         return []
     update(12, 'Transcribing speech with Whisper AI…')
     from faster_whisper import WhisperModel
-    model = WhisperModel('tiny', device='cpu', compute_type='int8', cpu_threads=1, num_workers=1)
-    segs, _ = model.transcribe(str(src), vad_filter=True, word_timestamps=True, beam_size=1)
-    data=[]
-    for s in segs:
-        txt=s.text.strip()
-        if txt:
-            data.append({'start':float(s.start),'end':float(s.end),'text':txt})
-    return data
+    import tempfile, gc
+    tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+    tmp.close()
+    try:
+        # Decode only low-bandwidth mono speech audio to keep RAM low.
+        run([
+            'ffmpeg','-y','-i',str(src),
+            '-vn','-ac','1','-ar','16000','-c:a','pcm_s16le',tmp.name
+        ])
+        model = WhisperModel(
+            'tiny', device='cpu', compute_type='int8',
+            cpu_threads=1, num_workers=1
+        )
+        segs, _ = model.transcribe(
+            tmp.name,
+            vad_filter=True,
+            word_timestamps=False,
+            beam_size=1,
+            condition_on_previous_text=False
+        )
+        data=[]
+        for s in segs:
+            txt=s.text.strip()
+            if txt:
+                data.append({'start':float(s.start),'end':float(s.end),'text':txt})
+        del segs
+        del model
+        gc.collect()
+        return data
+    finally:
+        try:
+            Path(tmp.name).unlink(missing_ok=True)
+        except Exception:
+            pass
 
 def visual_energy(src, update):
     update(33, 'Detecting motion, cuts and visual peaks…')
-    cap=cv2.VideoCapture(str(src))
-    fps=cap.get(cv2.CAP_PROP_FPS) or 25.0
-    sample=max(1,int(fps*1.5))
-    prev=None; i=0; scores=[]
-    while True:
-        ok,frame=cap.read()
-        if not ok: break
-        if i%sample==0:
-            gray=cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
-            gray=cv2.resize(gray,(192,108))
+    # Ask ffmpeg for a tiny grayscale frame every ~2 seconds, avoiding
+    # full-resolution decode buffers inside Python/OpenCV.
+    import tempfile, gc
+    td = Path(tempfile.mkdtemp(prefix='vf_frames_'))
+    pattern = td / 'f_%05d.pgm'
+    try:
+        run([
+            'ffmpeg','-y','-i',str(src),
+            '-vf','fps=1/2,scale=160:90,format=gray',
+            '-vsync','vfr',str(pattern)
+        ])
+        scores=[]; prev=None
+        frames=sorted(td.glob('f_*.pgm'))
+        for idx,fp in enumerate(frames):
+            gray=cv2.imread(str(fp),cv2.IMREAD_GRAYSCALE)
+            if gray is None:
+                continue
             val=0.0 if prev is None else float(np.mean(cv2.absdiff(gray,prev)))
-            scores.append((i/fps,val)); prev=gray
-        i+=1
-    cap.release()
-    return scores
+            scores.append((idx*2.0,val))
+            prev=gray
+        del prev
+        gc.collect()
+        return scores
+    finally:
+        for fp in td.glob('*'):
+            try: fp.unlink()
+            except Exception: pass
+        try: td.rmdir()
+        except Exception: pass
 
 def sentence_score(text):
     low=text.lower()
@@ -154,7 +194,9 @@ def export(src,out,start,end,srt):
     vf="scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280"
     if srt.exists() and srt.stat().st_size:
         vf += f",subtitles='{esc(srt)}':force_style='FontName=Arial,FontSize=19,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=155'"
-    run(['ffmpeg','-y','-ss',f'{start:.3f}','-i',str(src),'-t',f'{end-start:.3f}','-vf',vf,'-c:v','libx264','-preset','veryfast','-crf','21','-c:a','aac','-b:a','160k','-movflags','+faststart',str(out)])
+    run(['ffmpeg','-y','-ss',f'{start:.3f}','-i',str(src),'-t',f'{end-start:.3f}',
+     '-vf',vf,'-threads','1','-c:v','libx264','-preset','ultrafast','-crf','24',
+     '-c:a','aac','-b:a','96k','-movflags','+faststart',str(out)])
 
 def process_video(src,outdir,update,clip_length=35,max_clips=6):
     outdir.mkdir(parents=True,exist_ok=True)
