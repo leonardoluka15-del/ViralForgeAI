@@ -12,6 +12,8 @@ from googleapiclient.http import MediaFileUpload
 from google.auth.transport.requests import Request as GoogleRequest
 from .pipeline import process_video
 import requests
+import jwt
+from jwt import PyJWKClient
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / 'app' / 'static'
@@ -96,11 +98,37 @@ def youtube_callback(request: Request, state: str = '', code: str = ''):
 
 
 def _require_automation_secret(request: Request):
-    expected=os.getenv("AUTOMATION_SECRET","").strip()
-    if not expected:
-        raise HTTPException(503,"Automation secret is not configured.")
     supplied=(request.headers.get("Authorization") or "").strip()
-    if not secrets.compare_digest(supplied, f"Bearer {expected}"):
+    if not supplied.startswith("Bearer "):
+        raise HTTPException(401,"Unauthorized automation request.")
+    token=supplied[7:].strip()
+
+    # First allow the private server-side bearer secret.
+    expected=os.getenv("AUTOMATION_SECRET","").strip()
+    if expected and secrets.compare_digest(token,expected):
+        return {"auth":"secret"}
+
+    # Otherwise accept a short-lived GitHub Actions OIDC token, but only
+    # from this repository's main branch and with ViralForge's audience.
+    try:
+        jwks=PyJWKClient("https://token.actions.githubusercontent.com/.well-known/jwks")
+        signing_key=jwks.get_signing_key_from_jwt(token)
+        claims=jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience="viralforge-ai",
+            issuer="https://token.actions.githubusercontent.com"
+        )
+        if claims.get("repository") != "leonardoluka15-del/ViralForgeAI":
+            raise ValueError("unexpected repository")
+        if claims.get("ref") != "refs/heads/main":
+            raise ValueError("unexpected ref")
+        event=claims.get("event_name")
+        if event not in {"schedule","workflow_dispatch","push"}:
+            raise ValueError("unexpected event")
+        return {"auth":"github_oidc","claims":claims}
+    except Exception:
         raise HTTPException(401,"Unauthorized automation request.")
 
 def youtube_credentials():
