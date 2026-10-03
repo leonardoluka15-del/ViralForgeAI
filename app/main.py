@@ -472,6 +472,29 @@ def _queue_cloud_clip(job):
 @app.get('/api/cloud-provider/status')
 def api_cloud_provider_status():
     return cloud_clip_provider_status()
+
+@app.post('/api/source/direct')
+def api_source_direct(payload: dict):
+    source_url=(payload.get("source_url") or "").strip()
+    if not source_url:
+        raise HTTPException(400,"source_url is required")
+    low=source_url.lower()
+    if not (low.startswith("http://") or low.startswith("https://")):
+        raise HTTPException(400,"source_url must be http(s)")
+    qid='direct_' + uuid.uuid4().hex[:10]
+    item={
+        'id':qid,
+        'status':'idea_ready',
+        'source_url':source_url,
+        'source_title':payload.get('source_title') or 'Direct source',
+        'source_channel':payload.get('source_channel') or 'Authorized source',
+        'target_length':int(payload.get('target_length') or 30),
+        'created_at':datetime.now(timezone.utc).isoformat()
+    }
+    with lock:
+        content_queue.insert(0,item)
+    return {'ok':True,'queue_id':qid,'status':'idea_ready'}
+
 @app.post('/api/cloud-provider/dispatch')
 def api_cloud_provider_dispatch(payload: dict):
     source_url=(payload.get("source_url") or "").strip()
