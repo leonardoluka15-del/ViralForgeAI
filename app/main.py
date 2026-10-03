@@ -1041,7 +1041,8 @@ def _process_direct_source(queue_id: str):
             src, outdir,
             lambda p,m: None,
             clip_length=target_length,
-            max_clips=1
+            max_clips=1,
+            skip_transcription=True
         )
         clips=result.get("clips") if isinstance(result,dict) else result
         if not clips:
