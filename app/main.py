@@ -11,6 +11,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.auth.transport.requests import Request as GoogleRequest
 from .pipeline import process_video
+import requests
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / 'app' / 'static'
@@ -361,17 +362,8 @@ def _run_trend_generation(queue_id):
                 item['error']=str(e)[:500]
 
 @app.post('/api/queue/{queue_id}/generate')
-def generate_queue_video(queue_id: str, background_tasks: BackgroundTasks):
-    with lock:
-        item = _queue_lookup(queue_id)
-        if not item:
-            raise HTTPException(404,'Queue item not found.')
-        if item.get('status') == 'generating':
-            return {'ok':True,'status':'generating'}
-        item['status']='queued_for_generation'
-        item.pop('error',None)
-    background_tasks.add_task(_run_trend_generation, queue_id)
-    return {'ok':True,'status':'queued_for_generation'}
+def generate_queue_video(queue_id: str):
+    raise HTTPException(410, 'The old thumbnail/TTS generator is disabled. ViralForge now requires real video footage.')
 
 def _auto_pick_trend():
     yt = build('youtube','v3',credentials=youtube_credentials(),cache_discovery=False)
@@ -419,6 +411,156 @@ def _auto_pick_trend():
     used={x.get('source_video_id') for x in worker_jobs}
     return next((x for x in candidates if x.get('video_id') not in used), None)
 
+
+
+COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+
+def _commons_license_ok(name: str) -> bool:
+    s=(name or "").lower()
+    return (
+        "public domain" in s or "cc0" in s or
+        "cc by" in s or "creative commons attribution" in s
+    )
+
+def _commons_search_videos(query: str, limit: int = 12):
+    params={
+        "action":"query","format":"json","generator":"search",
+        "gsrsearch":query,"gsrnamespace":6,"gsrlimit":max(1,min(limit,25)),
+        "prop":"imageinfo",
+        "iiprop":"url|mime|size|extmetadata"
+    }
+    r=requests.get(COMMONS_API,params=params,timeout=30,headers={"User-Agent":"ViralForgeAI/1.0"})
+    r.raise_for_status()
+    pages=(r.json().get("query") or {}).get("pages") or {}
+    rows=[]
+    for page in pages.values():
+        ii=((page.get("imageinfo") or [{}])[0])
+        mime=(ii.get("mime") or "").lower()
+        if not mime.startswith("video/"):
+            continue
+        meta=ii.get("extmetadata") or {}
+        def mv(k):
+            v=meta.get(k) or {}
+            return re.sub("<[^>]+>","",str(v.get("value") or "")).strip()
+        license_name=mv("LicenseShortName") or mv("UsageTerms")
+        if not _commons_license_ok(license_name):
+            continue
+        url=ii.get("url")
+        if not url:
+            continue
+        rows.append({
+            "title":page.get("title","").replace("File:","",1),
+            "source_url":url,
+            "description":mv("ImageDescription"),
+            "artist":mv("Artist"),
+            "credit":mv("Credit"),
+            "license":license_name,
+            "license_url":mv("LicenseUrl"),
+            "width":ii.get("width"),
+            "height":ii.get("height"),
+            "size":ii.get("size"),
+            "mime":mime,
+            "commons_page":ii.get("descriptionurl")
+        })
+    return rows
+
+@app.get('/api/free-source/search')
+def api_free_source_search(q: str = "nature", limit: int = 12):
+    q=(q or "nature").strip()[:120]
+    try:
+        items=_commons_search_videos(q,limit)
+        return {"provider":"Wikimedia Commons","query":q,"count":len(items),"items":items}
+    except Exception as e:
+        raise HTTPException(502,f"Free source search failed: {str(e)[:240]}")
+
+def _process_direct_source(queue_id: str):
+    with lock:
+        item=_queue_lookup(queue_id)
+        if not item:
+            return
+        item["status"]="downloading_source"
+        src_url=item.get("source_url")
+        target_length=int(item.get("target_length") or 30)
+    outdir=OUTPUTS / f"direct_{queue_id}"
+    outdir.mkdir(parents=True,exist_ok=True)
+    src=outdir/"source.mp4"
+    try:
+        with requests.get(src_url,stream=True,timeout=(15,120),headers={"User-Agent":"ViralForgeAI/1.0"}) as r:
+            r.raise_for_status()
+            total=int(r.headers.get("content-length") or 0)
+            if total and total > 120*1024*1024:
+                raise RuntimeError("Source video is larger than the 120 MB cloud test limit.")
+            written=0
+            with src.open("wb") as fh:
+                for chunk in r.iter_content(chunk_size=1024*1024):
+                    if not chunk:
+                        continue
+                    written += len(chunk)
+                    if written > 120*1024*1024:
+                        raise RuntimeError("Source video exceeded the 120 MB cloud test limit.")
+                    fh.write(chunk)
+        with lock:
+            item=_queue_lookup(queue_id)
+            if item:
+                item["status"]="ai_clipping"
+        result=process_video(
+            str(src), str(outdir),
+            lambda p,m: None,
+            clip_length=target_length,
+            max_clips=1
+        )
+        clips=result.get("clips") if isinstance(result,dict) else result
+        if not clips:
+            raise RuntimeError("AI pipeline returned no clip.")
+        clip=clips[0]
+        clip_url=clip.get("url") or clip.get("media_url")
+        if clip_url and clip_url.startswith("/media/"):
+            media_url=clip_url
+        else:
+            # pipeline typically writes inside outdir; find newest rendered mp4 excluding source.
+            rendered=[p for p in outdir.glob("*.mp4") if p.name!="source.mp4"]
+            if not rendered:
+                rendered=list(outdir.rglob("*.mp4"))
+                rendered=[p for p in rendered if p.name!="source.mp4"]
+            if not rendered:
+                raise RuntimeError("Rendered clip file was not found.")
+            rp=max(rendered,key=lambda p:p.stat().st_mtime)
+            media_url="/media/"+str(rp.relative_to(OUTPUTS)).replace("\\","/")
+        with lock:
+            item=_queue_lookup(queue_id)
+            if item:
+                item["status"]="video_ready"
+                item["media_url"]=media_url
+                item["clip"]=clip
+    except Exception as e:
+        with lock:
+            item=_queue_lookup(queue_id)
+            if item:
+                item["status"]="error"
+                item["error"]=str(e)[:500]
+
+@app.post('/api/free-source/process')
+def api_free_source_process(payload: dict, background_tasks: BackgroundTasks):
+    source_url=(payload.get("source_url") or "").strip()
+    if not source_url.startswith("https://"):
+        raise HTTPException(400,"A HTTPS video source_url is required.")
+    qid="free_"+uuid.uuid4().hex[:10]
+    item={
+        "id":qid,
+        "status":"queued",
+        "source_url":source_url,
+        "source_title":payload.get("title") or "Licensed source video",
+        "source_channel":"Wikimedia Commons",
+        "license":payload.get("license"),
+        "license_url":payload.get("license_url"),
+        "credit":payload.get("credit"),
+        "target_length":int(payload.get("target_length") or 15),
+        "created_at":datetime.now(timezone.utc).isoformat()
+    }
+    with lock:
+        content_queue.insert(0,item)
+    background_tasks.add_task(_process_direct_source,qid)
+    return {"ok":True,"queue_id":qid,"status":"queued"}
 
 def cloud_clip_provider_status():
     if os.getenv("OPUSCLIP_API_KEY"):
@@ -662,7 +804,7 @@ async def worker_complete(job_id: str, video: UploadFile = File(...)):
             f"Source: {meta.get('source_channel','YouTube')}\n{meta.get('source_url','')}\n\n#Shorts #Trending")
         body = {
             'snippet': {'title': title, 'description': description, 'categoryId': '24'},
-            'status': {'privacyStatus': 'public', 'selfDeclaredMadeForKids': False}
+            'status': {'privacyStatus': 'private', 'selfDeclaredMadeForKids': False}
         }
         media = MediaFileUpload(str(final_path), mimetype='video/mp4', resumable=True, chunksize=8*1024*1024)
         req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
