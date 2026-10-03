@@ -1,0 +1,60 @@
+name: ViralForge Free Source Test
+
+on:
+  push:
+    paths:
+      - ".github/workflows/free-source-test.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Start real-footage test
+        id: start
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESPONSE=$(curl -sS -X POST "https://viralforge-ai-jwuo.onrender.com/api/free-source/process" \
+            -H "Content-Type: application/json" \
+            --data-binary @- <<'JSON'
+          {
+            "source_url": "https://upload.wikimedia.org/wikipedia/commons/a/a6/PIO06_Ovcarsko-Kablarska_Klisura.webm?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+            "title": "PIO06 Ovcarsko-Kablarska Klisura",
+            "license": "CC BY-SA 4.0",
+            "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+            "credit": "Mills93 — Own work",
+            "target_length": 15
+          }
+          JSON
+          )
+          echo "$RESPONSE"
+          QID=$(echo "$RESPONSE" | jq -r '.queue_id')
+          test -n "$QID" && test "$QID" != "null"
+          echo "qid=$QID" >> "$GITHUB_OUTPUT"
+
+      - name: Poll ViralForge until terminal
+        shell: bash
+        env:
+          QID: ${{ steps.start.outputs.qid }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            QUEUE=$(curl -sS "https://viralforge-ai-jwuo.onrender.com/api/queue")
+            ITEM=$(echo "$QUEUE" | jq -c --arg id "$QID" '.items[]? | select(.id==$id)')
+            STATUS=$(echo "$ITEM" | jq -r '.status // "missing"')
+            echo "poll=$i status=$STATUS"
+            echo "$ITEM"
+            if [ "$STATUS" = "video_ready" ]; then
+              echo "SUCCESS: real licensed footage was clipped by ViralForge."
+              exit 0
+            fi
+            if [ "$STATUS" = "error" ]; then
+              echo "FAILURE: $(echo "$ITEM" | jq -r '.error // "unknown error"')"
+              exit 1
+            fi
+            sleep 15
+          done
+          echo "Timed out waiting for ViralForge."
+          exit 1
