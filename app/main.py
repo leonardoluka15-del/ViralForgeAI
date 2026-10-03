@@ -474,6 +474,31 @@ def api_free_source_search(q: str = "nature", limit: int = 12):
     except Exception as e:
         raise HTTPException(502,f"Free source search failed: {str(e)[:240]}")
 
+
+def _upload_private_clip(video_path: Path, title: str, description: str):
+    yt=build('youtube','v3',credentials=youtube_credentials(),cache_discovery=False)
+    body={
+        'snippet':{
+            'title':(title or 'ViralForge Test Short')[:100],
+            'description':description or '#Shorts',
+            'categoryId':'22'
+        },
+        'status':{
+            'privacyStatus':'private',
+            'selfDeclaredMadeForKids':False
+        }
+    }
+    media=MediaFileUpload(str(video_path),mimetype='video/mp4',resumable=True,chunksize=8*1024*1024)
+    req=yt.videos().insert(part='snippet,status',body=body,media_body=media)
+    response=None
+    while response is None:
+        _,response=req.next_chunk()
+    return {
+        'video_id':response.get('id'),
+        'youtube_url':f"https://www.youtube.com/watch?v={response.get('id')}",
+        'privacy':'private'
+    }
+
 def _process_direct_source(queue_id: str):
     with lock:
         item=_queue_lookup(queue_id)
@@ -527,12 +552,33 @@ def _process_direct_source(queue_id: str):
                 raise RuntimeError("Rendered clip file was not found.")
             rp=max(rendered,key=lambda p:p.stat().st_mtime)
             media_url="/media/"+str(rp.relative_to(OUTPUTS)).replace("\\","/")
+        yt_result=None
+        try:
+            if clip_url and clip_url.startswith("/media/"):
+                rendered_path=OUTPUTS / clip_url.replace("/media/","",1)
+            else:
+                rendered_path=rp
+            desc=(
+                f"Source: Wikimedia Commons\\n"
+                f"Credit: {item.get('credit') or 'See source'}\\n"
+                f"License: {item.get('license') or ''} {item.get('license_url') or ''}\\n\\n"
+                "#Shorts #ViralForge"
+            )
+            yt_result=_upload_private_clip(
+                rendered_path,
+                (item.get("source_title") or "ViralForge Test Short")[:90] + " #Shorts",
+                desc
+            )
+        except Exception as upload_error:
+            yt_result={"error":str(upload_error)[:400]}
+
         with lock:
             item=_queue_lookup(queue_id)
             if item:
-                item["status"]="video_ready"
+                item["status"]="uploaded_private" if yt_result and yt_result.get("video_id") else "video_ready"
                 item["media_url"]=media_url
                 item["clip"]=clip
+                item["youtube"]=yt_result
     except Exception as e:
         with lock:
             item=_queue_lookup(queue_id)
