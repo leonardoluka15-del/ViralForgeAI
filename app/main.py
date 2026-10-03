@@ -452,7 +452,13 @@ def _queue_cloud_clip(job):
             "lang":"en",
             "preferLength":[1],
             "videoUrl":job["source_url"],
-            "videoType":2
+            "videoType":2,
+            "ratioOfClip":1,
+            "maxClipNumber":1,
+            "subtitleSwitch":1,
+            "headlineSwitch":1,
+            "removeSilenceSwitch":1,
+            "projectName":job.get("source_title") or "ViralForge"
         }
         r=requests.post(
             "https://elb-api.vizard.ai/hvizard-server-front/open-api/v1/project/create",
@@ -466,6 +472,24 @@ def _queue_cloud_clip(job):
 @app.get('/api/cloud-provider/status')
 def api_cloud_provider_status():
     return cloud_clip_provider_status()
+@app.post('/api/cloud-provider/dispatch')
+def api_cloud_provider_dispatch(payload: dict):
+    source_url=(payload.get("source_url") or "").strip()
+    if not source_url:
+        raise HTTPException(400,"source_url is required")
+    job={
+        "source_url":source_url,
+        "source_title":payload.get("source_title") or "ViralForge",
+        "target_length":int(payload.get("target_length") or 30)
+    }
+    result=_queue_cloud_clip(job)
+    if result is None:
+        raise HTTPException(
+            503,
+            "No cloud clipping provider configured. Set VIZARD_API_KEY or KLAP_API_KEY on the server."
+        )
+    return {"ok":True,**result}
+
 
 @app.get('/api/worker/next')
 def worker_next():
