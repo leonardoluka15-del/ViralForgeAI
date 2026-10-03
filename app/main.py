@@ -24,6 +24,7 @@ app.mount('/static', StaticFiles(directory=STATIC), name='static')
 app.mount('/media', StaticFiles(directory=OUTPUTS), name='media')
 
 jobs = {}
+content_queue = []
 lock = threading.Lock()
 
 @app.get('/')
@@ -191,6 +192,78 @@ def youtube_trends(region: str = 'US', max_results: int = 24):
         return {'region':region,'count':len(rows),'items':rows}
     except Exception as e:
         raise HTTPException(500, f'Trend Scout failed: {str(e)[:300]}')
+
+@app.post('/api/queue/from-trend')
+async def queue_from_trend(
+    video_id: str = Form(...),
+    title: str = Form(...),
+    channel: str = Form(''),
+    views: int = Form(0),
+    views_per_hour: int = Form(0),
+    trend_score: int = Form(0),
+    source_url: str = Form('')
+):
+    qid = uuid.uuid4().hex[:10]
+    clean_title = (title or '').strip()
+    low = clean_title.lower()
+
+    if any(k in low for k in ['trailer','teaser','movie','film','netflix','marvel','dc','disney','prime video']):
+        angle = 'Explain why this trailer is trending and highlight the most talked-about reveal without reposting the full trailer.'
+        hook = f"Everyone is talking about {clean_title[:70]} — here’s the moment people noticed."
+    elif any(k in low for k in ['mrbeast','challenge','giveaway','survive','million']):
+        angle = 'Create a commentary-style recap focused on the surprising premise, stakes, and audience reaction.'
+        hook = f"This is why {clean_title[:70]} is exploding right now."
+    elif any(k in low for k in ['game','gaming','playstation','xbox','nintendo','fortnite','gta','minecraft']):
+        angle = 'Create a fast gaming-news Short explaining the announcement and why fans care.'
+        hook = f"Gamers are reacting fast to {clean_title[:70]}."
+    else:
+        angle = 'Create a short commentary recap explaining what happened, why it is trending, and the most interesting takeaway.'
+        hook = f"This video is taking off fast — here’s why: {clean_title[:70]}"
+
+    generated_title = clean_title[:88] if clean_title else 'Trending video explained'
+    if len(generated_title) < 90 and not generated_title.endswith('...'):
+        generated_title = generated_title.rstrip(' .') + ' — Why It’s Trending'
+
+    description = f"{angle}\n\nSource: {channel or 'YouTube'}\n#Shorts #Trending #Viral"
+    hashtags = ['#Shorts','#Trending','#Viral']
+    if channel:
+        safe_tag = ''.join(ch for ch in channel.title().replace(' ','') if ch.isalnum())
+        if safe_tag:
+            hashtags.append('#'+safe_tag[:24])
+
+    item = {
+        'id': qid,
+        'status': 'idea_ready',
+        'source_video_id': video_id,
+        'source_url': source_url or f"https://www.youtube.com/watch?v={video_id}",
+        'source_title': clean_title,
+        'source_channel': channel,
+        'views': int(views or 0),
+        'views_per_hour': int(views_per_hour or 0),
+        'trend_score': int(trend_score or 0),
+        'hook': hook,
+        'angle': angle,
+        'title': generated_title[:100],
+        'description': description,
+        'hashtags': hashtags,
+        'created_at': datetime.now(timezone.utc).isoformat()
+    }
+    with lock:
+        content_queue.insert(0,item)
+        del content_queue[50:]
+    return item
+
+@app.get('/api/queue')
+def get_queue():
+    with lock:
+        return {'count': len(content_queue), 'items': list(content_queue)}
+
+@app.delete('/api/queue/{queue_id}')
+def delete_queue_item(queue_id: str):
+    with lock:
+        before=len(content_queue)
+        content_queue[:] = [x for x in content_queue if x.get('id') != queue_id]
+        return {'ok': len(content_queue) < before}
 
 @app.post('/api/youtube/upload')
 def youtube_upload(
