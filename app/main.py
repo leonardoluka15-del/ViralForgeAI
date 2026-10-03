@@ -39,7 +39,7 @@ def home():
 def health():
     return {'ok': True, 'service': 'ViralForge AI'}
 
-YOUTUBE_SCOPES = ['https://www.googleapis.com/auth/youtube.upload','https://www.googleapis.com/auth/youtube.readonly','https://www.googleapis.com/auth/drive.file']
+YOUTUBE_SCOPES = ['https://www.googleapis.com/auth/youtube.upload','https://www.googleapis.com/auth/youtube.readonly']
 YOUTUBE_REDIRECT = 'https://viralforge-ai-jwuo.onrender.com/youtube/callback'
 DRIVE_FOLDER_ID = '1M8INGVhocKTKYNKbHCZzXthtKSSXhym2'
 oauth_states = set()
@@ -838,17 +838,6 @@ def _process_direct_source(queue_id: str):
             rp=max(rendered,key=lambda p:p.stat().st_mtime)
             media_url="/media/"+str(rp.relative_to(OUTPUTS)).replace("\\","/")
         drive_result=None
-        try:
-            if clip_url and clip_url.startswith("/media/"):
-                drive_path=OUTPUTS / clip_url.replace("/media/","",1)
-            else:
-                drive_path=rp
-            drive_result=_upload_clip_to_drive(
-                drive_path,
-                (item.get("title") or item.get("source_title") or f"viralforge_{queue_id}")
-            )
-        except Exception as drive_error:
-            drive_result={"error":str(drive_error)[:400]}
 
         yt_result=None
         try:
