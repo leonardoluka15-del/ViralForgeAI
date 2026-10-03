@@ -77,7 +77,9 @@ async function loadQueue(){
   if(!queueGrid||!queueStatus)return;
   try{
     const r=await fetch('/api/queue');
-    const j=await r.json();
+    const raw=await r.text(); let j;
+    try{j=JSON.parse(raw)}catch(_){throw Error('The Render worker restarted while generating. Please wait a few seconds and refresh the queue.')}
+    if(!r.ok)throw Error(j.detail||'Queue request failed');
     queueStatus.textContent=(j.count||0)+' queued Short idea'+((j.count||0)===1?'':'s');
     queueGrid.innerHTML=(j.items||[]).map(q=>`<article class="queue-card">
       <div class="queue-head"><span class="trend-score">✦ ${q.trend_score}/100</span><span class="queue-state">${esc(q.status)}</span></div>
