@@ -95,18 +95,27 @@ def browser_segment(video_id,outdir,target):
 
 def download_source(url,outdir,target):
     out=outdir/"source.mp4"
-    try:
-        run(["yt-dlp","--no-playlist",
-             "-f","bv*[height<=720]+ba/b[height<=720]/b",
-             "--merge-output-format","mp4","-o",str(out),url])
-        return out,"yt-dlp",None
-    except Exception as e:
-        m=re.search(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})",url)
-        if not m:
-            raise
-        seg,start=browser_segment(m.group(1),outdir,target)
-        return seg,"browser",start
-
+    attempts = [
+        ["yt-dlp","--no-playlist","--js-runtimes","node",
+         "-f","bv*[height<=720]+ba/b[height<=720]/b",
+         "--merge-output-format","mp4","-o",str(out),url],
+        ["yt-dlp","--no-playlist","--js-runtimes","node",
+         "--extractor-args","youtube:player_client=web_embedded,tv_embedded",
+         "-f","bv*[height<=720]+ba/b[height<=720]/b",
+         "--merge-output-format","mp4","-o",str(out),url],
+    ]
+    last=None
+    for cmd in attempts:
+        try:
+            run(cmd)
+            return out,"yt-dlp",None
+        except Exception as e:
+            last=e
+    m=re.search(r"(?:v=|youtu\\.be/)([A-Za-z0-9_-]{11})",url)
+    if not m:
+        raise last
+    seg,start=browser_segment(m.group(1),outdir,target)
+    return seg,"browser",start
 def post_progress(job_id,status,message):
     try:
         requests.post(f"{API}/api/worker/{job_id}/progress",
