@@ -1,0 +1,21 @@
+services:
+  viral-clipper:
+    build: .
+    container_name: viral-clipper
+    ports:
+      - "3000:8000"
+    environment:
+      - OLLAMA_URL=http://host.docker.internal:11434
+      - OLLAMA_MODEL=llama3.2:3b
+      - WHISPER_MODEL=small
+      - CLIP_COUNT=5
+    volumes:
+      - clip-data:/app/data
+      - whisper-cache:/root/.cache/huggingface
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  clip-data:
+  whisper-cache:
