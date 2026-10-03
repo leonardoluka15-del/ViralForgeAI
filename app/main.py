@@ -398,9 +398,82 @@ def _run_trend_generation(queue_id):
                 item['status']='error'
                 item['error']=str(e)[:500]
 
+def _looks_like_direct_video_url(url: str) -> bool:
+    low=(url or "").lower().split("?",1)[0]
+    return low.startswith(("http://","https://")) and low.endswith((".mp4",".webm",".mov",".m4v",".avi"))
+
+def _queue_provider_generate(queue_id: str):
+    with lock:
+        item=_queue_lookup(queue_id)
+        if not item:
+            return
+        item["status"]="provider_dispatch"
+    try:
+        result=_queue_cloud_clip({
+            "source_url":item.get("source_url"),
+            "source_title":item.get("source_title") or item.get("title"),
+            "target_length":15
+        })
+        if not result:
+            raise RuntimeError(
+                "This queue item is a YouTube source, but no cloud media provider is configured. "
+                "ViralForge will not replace it with a thumbnail or unrelated stock footage."
+            )
+        with lock:
+            item=_queue_lookup(queue_id)
+            if item:
+                item["status"]="provider_processing"
+                item["provider_job"]=result
+    except Exception as e:
+        with lock:
+            item=_queue_lookup(queue_id)
+            if item:
+                item["status"]="source_unavailable"
+                item["error"]=str(e)[:500]
+
 @app.post('/api/queue/{queue_id}/generate')
-def generate_queue_video(queue_id: str):
-    raise HTTPException(410, 'The old thumbnail/TTS generator is disabled. ViralForge now requires real video footage.')
+def generate_queue_video(queue_id: str, background_tasks: BackgroundTasks):
+    with lock:
+        item=_queue_lookup(queue_id)
+        if not item:
+            raise HTTPException(404,"Queue item not found.")
+        if item.get("media_url"):
+            return {"ok":True,"status":"video_ready","media_url":item.get("media_url")}
+        if item.get("status") in {
+            "queued","downloading_source","ai_clipping","provider_dispatch","provider_processing"
+        }:
+            return {"ok":True,"status":item.get("status")}
+        item.pop("error",None)
+        source_url=(item.get("production_source_url") or item.get("source_url") or "").strip()
+
+    if _looks_like_direct_video_url(source_url):
+        with lock:
+            item=_queue_lookup(queue_id)
+            if item:
+                item["status"]="queued"
+                item["production_source_url"]=source_url
+        background_tasks.add_task(_process_direct_source,queue_id)
+        return {"ok":True,"status":"queued","mode":"direct"}
+
+    if "youtube.com/" in source_url.lower() or "youtu.be/" in source_url.lower():
+        provider=cloud_clip_provider_status()
+        if not provider.get("configured"):
+            with lock:
+                item=_queue_lookup(queue_id)
+                if item:
+                    item["status"]="source_unavailable"
+                    item["error"]=(
+                        "Real source footage is not available through the free cloud path for this YouTube item. "
+                        "No thumbnail/TTS substitute was created."
+                    )
+            raise HTTPException(
+                409,
+                "This queue item is YouTube-only. Real source footage is not available through the free cloud path yet."
+            )
+        background_tasks.add_task(_queue_provider_generate,queue_id)
+        return {"ok":True,"status":"provider_dispatch","provider":provider.get("provider")}
+
+    raise HTTPException(400,"This queue item does not contain a usable real-video source.")
 
 def _auto_pick_trend():
     yt = build('youtube','v3',credentials=youtube_credentials(),cache_discovery=False)
@@ -673,7 +746,7 @@ def _process_direct_source(queue_id: str):
         if not item:
             return
         item["status"]="downloading_source"
-        src_url=item.get("source_url")
+        src_url=item.get("production_source_url") or item.get("source_url")
         target_length=int(item.get("target_length") or 30)
     outdir=OUTPUTS / f"direct_{queue_id}"
     outdir.mkdir(parents=True,exist_ok=True)
