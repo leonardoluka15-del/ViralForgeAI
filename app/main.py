@@ -60,18 +60,25 @@ async def create_job(background_tasks: BackgroundTasks, video: UploadFile | None
         src = UPLOADS / f'{jid}.mp4'
         try:
             ydl_opts = {
-                'format': 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best',
+                'format': 'best[ext=mp4][height<=720]/best[height<=720]/best',
                 'merge_output_format': 'mp4',
                 'outtmpl': str(src),
                 'noplaylist': True,
                 'quiet': True,
                 'no_warnings': True,
             }
+            if host in {'youtube.com','www.youtube.com','youtu.be'}:
+                ydl_opts['extractor_args'] = {
+                    'youtube': {'player_client': ['android']}
+                }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url.strip(), download=True)
                 display_name = info.get('title') or video_url.strip()
         except Exception as e:
-            raise HTTPException(400, f'Could not fetch that video link: {str(e)[:180]}')
+            msg = str(e)[:220]
+            if 'confirm you’re not a bot' in msg.lower() or 'confirm you\'re not a bot' in msg.lower():
+                msg = 'YouTube blocked this server request. Try again once; if it persists, upload the video file instead.'
+            raise HTTPException(400, f'Could not fetch that video link: {msg}')
     else:
         raise HTTPException(400, 'Choose a video file or paste a supported video link.')
 
