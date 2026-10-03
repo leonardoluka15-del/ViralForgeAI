@@ -22,7 +22,18 @@ def duration(src):
     out = run(['ffprobe','-v','error','-show_entries','format=duration','-of','default=nw=1:nk=1',str(src)])
     return float(out.strip())
 
+def has_audio(src):
+    probe=subprocess.run(
+        ['ffprobe','-v','error','-select_streams','a:0','-show_entries','stream=index',
+         '-of','csv=p=0',str(src)],
+        capture_output=True,text=True
+    )
+    return probe.returncode == 0 and bool((probe.stdout or '').strip())
+
 def transcribe(src, update):
+    if not has_audio(src):
+        update(12, 'No audio track detected — skipping speech transcription…')
+        return []
     update(12, 'Transcribing speech with Whisper AI…')
     from faster_whisper import WhisperModel
     model = WhisperModel('tiny', device='cpu', compute_type='int8', cpu_threads=1, num_workers=1)
