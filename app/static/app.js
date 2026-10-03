@@ -89,9 +89,9 @@ async function loadQueue(){
       <h3>${esc(q.title)}</h3>
       <p class="queue-hook"><b>Hook:</b> ${esc(q.hook)}</p>
       <p class="queue-angle"><b>Angle:</b> ${esc(q.angle)}</p>
-      <div class="queue-meta"><span>${fmt(q.views_per_hour)}/hr</span><span>${esc(q.source_channel||'YouTube')}</span></div>
+      <div class="queue-meta"><span>${fmt(q.views_per_hour)}/hr</span><span>${esc(q.source_channel||'Clip-ready source')}</span></div>
       <div class="queue-tags">${(q.hashtags||[]).map(h=>'<span>'+esc(h)+'</span>').join('')}</div>
-      <div class="trend-actions"><a class="trend-open" href="${q.source_url}" target="_blank" rel="noopener">View trend ↗</a>${q.media_url?'<a class="download" href="/api/queue/'+q.id+'/download">Download MP4 ↓</a>':'<button class="trend-create" onclick="generateQueue(\''+q.id+'\')">Generate Short</button>'}${q.drive_url?'<a class="trend-open" href="'+q.drive_url+'" target="_blank" rel="noopener">Drive backup ↗</a>':''}<button class="queue-remove" onclick="removeQueue('${q.id}')">Remove</button></div>
+      <div class="trend-actions"><a class="trend-open" href="${q.trend_reference_url||q.source_url}" target="_blank" rel="noopener">View original trend ↗</a><a class="trend-open" href="${q.production_source_url||q.source_url}" target="_blank" rel="noopener">View production source ↗</a>${q.media_url?'<a class="download" href="/api/queue/'+q.id+'/download">Download MP4 ↓</a>':'<button class="trend-create" onclick="generateQueue(\''+q.id+'\')">Generate Short</button>'}${q.drive_url?'<a class="trend-open" href="'+q.drive_url+'" target="_blank" rel="noopener">Drive backup ↗</a>':''}<button class="queue-remove" onclick="removeQueue('${q.id}')">Remove</button></div>
     </article>`).join('');
   }catch(e){
     queueStatus.textContent='Could not load queue: '+e.message;
