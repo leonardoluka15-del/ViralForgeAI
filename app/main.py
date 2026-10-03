@@ -7,6 +7,8 @@ import yt_dlp
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+from google.auth.transport.requests import Request as GoogleRequest
 from .pipeline import process_video
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,12 +90,111 @@ def youtube_callback(request: Request, state: str = '', code: str = ''):
     <p>After saving it in Render, redeploy ViralForge. Then the server can upload to your YouTube channel without you being present.</p>
     </body></html>""")
 
+def youtube_credentials():
+    cid = os.getenv('YOUTUBE_CLIENT_ID','').strip()
+    secret = os.getenv('YOUTUBE_CLIENT_SECRET','').strip()
+    refresh = os.getenv('YOUTUBE_REFRESH_TOKEN','').strip()
+    if not cid or not secret or not refresh:
+        raise HTTPException(503, 'YouTube credentials are incomplete in Render Environment.')
+    creds = Credentials(
+        token=None,
+        refresh_token=refresh,
+        token_uri='https://oauth2.googleapis.com/token',
+        client_id=cid,
+        client_secret=secret,
+        scopes=YOUTUBE_SCOPES,
+    )
+    creds.refresh(GoogleRequest())
+    return creds
+
 @app.get('/api/youtube/status')
 def youtube_status():
     cid = bool(os.getenv('YOUTUBE_CLIENT_ID','').strip())
     secret = bool(os.getenv('YOUTUBE_CLIENT_SECRET','').strip())
     refresh = bool(os.getenv('YOUTUBE_REFRESH_TOKEN','').strip())
-    return {'configured': cid and secret and refresh, 'client_id': cid, 'client_secret': secret, 'refresh_token': refresh}
+    base = {'configured': cid and secret and refresh, 'client_id': cid, 'client_secret': secret, 'refresh_token': refresh}
+    if not base['configured']:
+        return base
+    try:
+        yt = build('youtube','v3',credentials=youtube_credentials(),cache_discovery=False)
+        resp = yt.channels().list(part='snippet,statistics', mine=True).execute()
+        items = resp.get('items',[])
+        if items:
+            ch = items[0]
+            base.update({
+                'authorized': True,
+                'channel_id': ch.get('id'),
+                'channel_title': ch.get('snippet',{}).get('title'),
+                'subscribers': ch.get('statistics',{}).get('subscriberCount'),
+                'videos': ch.get('statistics',{}).get('videoCount'),
+            })
+        else:
+            base.update({'authorized': False, 'error': 'No YouTube channel found for this Google account.'})
+    except Exception as e:
+        base.update({'authorized': False, 'error': str(e)[:240]})
+    return base
+
+@app.post('/api/youtube/upload')
+def youtube_upload(
+    job_id: str = Form(...),
+    rank: int = Form(1),
+    title: str = Form(''),
+    description: str = Form(''),
+    privacy: str = Form('private'),
+    publish_at: str = Form('')
+):
+    if privacy not in {'private','unlisted','public'}:
+        privacy = 'private'
+    with lock:
+        job = jobs.get(job_id)
+        if not job or job.get('status') != 'done':
+            raise HTTPException(404, 'Completed job not found.')
+        clips = job.get('clips',[])
+        clip = next((c for c in clips if int(c.get('rank',0)) == int(rank)), None)
+    if not clip:
+        raise HTTPException(404, 'Clip not found.')
+
+    rel = clip.get('url','').replace('/media/','',1)
+    video_path = OUTPUTS / rel
+    if not video_path.exists():
+        raise HTTPException(404, 'Rendered clip file is no longer available on this server.')
+
+    final_title = (title.strip() or clip.get('title') or f'ViralForge Short #{rank}')[:100]
+    final_description = description.strip() or '#Shorts'
+    if '#shorts' not in final_description.lower():
+        final_description = final_description.rstrip() + '\n\n#Shorts'
+
+    status = {'privacyStatus': privacy, 'selfDeclaredMadeForKids': False}
+    if publish_at.strip():
+        status['privacyStatus'] = 'private'
+        status['publishAt'] = publish_at.strip()
+
+    body = {
+        'snippet': {
+            'title': final_title,
+            'description': final_description,
+            'categoryId': '22',
+        },
+        'status': status,
+    }
+
+    try:
+        yt = build('youtube','v3',credentials=youtube_credentials(),cache_discovery=False)
+        media = MediaFileUpload(str(video_path), mimetype='video/mp4', resumable=True, chunksize=8*1024*1024)
+        req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
+        response = None
+        while response is None:
+            _, response = req.next_chunk()
+        return {
+            'ok': True,
+            'video_id': response.get('id'),
+            'title': final_title,
+            'privacy': status.get('privacyStatus'),
+            'publish_at': status.get('publishAt'),
+            'youtube_url': f"https://www.youtube.com/watch?v={response.get('id')}"
+        }
+    except Exception as e:
+        raise HTTPException(500, f'YouTube upload failed: {str(e)[:400]}')
 
 
 @app.post('/api/jobs')
