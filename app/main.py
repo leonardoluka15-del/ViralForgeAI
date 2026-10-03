@@ -419,6 +419,54 @@ def _auto_pick_trend():
     used={x.get('source_video_id') for x in worker_jobs}
     return next((x for x in candidates if x.get('video_id') not in used), None)
 
+
+def cloud_clip_provider_status():
+    if os.getenv("KLAP_API_KEY"):
+        return {"provider":"klap","configured":True}
+    if os.getenv("VIZARD_API_KEY"):
+        return {"provider":"vizard","configured":True}
+    return {"provider":None,"configured":False}
+
+def _queue_cloud_clip(job):
+    provider=cloud_clip_provider_status()
+    if not provider["configured"]:
+        return None
+    if provider["provider"]=="klap":
+        headers={"Authorization":f"Bearer {os.environ['KLAP_API_KEY']}","Content-Type":"application/json"}
+        payload={
+            "source_video_url":job["source_url"],
+            "language":"en",
+            "target_clip_count":1,
+            "max_clip_count":1,
+            "target_duration":int(job.get("target_length") or 30),
+            "editing_options":{"captions":True,"reframe":True},
+            "name":job.get("source_title") or "ViralForge"
+        }
+        r=requests.post("https://api.klap.app/v2/tasks/video-to-shorts",headers=headers,json=payload,timeout=60)
+        r.raise_for_status()
+        data=r.json()
+        return {"provider":"klap","task":data}
+    if provider["provider"]=="vizard":
+        headers={"VIZARDAI_API_KEY":os.environ["VIZARD_API_KEY"],"Content-Type":"application/json"}
+        payload={
+            "lang":"en",
+            "preferLength":[1],
+            "videoUrl":job["source_url"],
+            "videoType":2
+        }
+        r=requests.post(
+            "https://elb-api.vizard.ai/hvizard-server-front/open-api/v1/project/create",
+            headers=headers,json=payload,timeout=60
+        )
+        r.raise_for_status()
+        data=r.json()
+        return {"provider":"vizard","task":data}
+    return None
+
+@app.get('/api/cloud-provider/status')
+def api_cloud_provider_status():
+    return cloud_clip_provider_status()
+
 @app.get('/api/worker/next')
 def worker_next():
     with lock:
