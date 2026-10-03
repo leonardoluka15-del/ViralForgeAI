@@ -46,9 +46,18 @@ jobs:
             STATUS=$(echo "$ITEM" | jq -r '.status // "missing"')
             echo "poll=$i status=$STATUS"
             echo "$ITEM"
-            if [ "$STATUS" = "video_ready" ]; then
-              echo "SUCCESS: real licensed footage was clipped by ViralForge."
+            if [ "$STATUS" = "uploaded_private" ]; then
+              VIDEO_ID=$(echo "$ITEM" | jq -r '.youtube.video_id // empty')
+              test -n "$VIDEO_ID"
+              echo "SUCCESS: real licensed footage was clipped and uploaded privately to YouTube. video_id=$VIDEO_ID"
               exit 0
+            fi
+            if [ "$STATUS" = "video_ready" ]; then
+              YT_ERROR=$(echo "$ITEM" | jq -r '.youtube.error // empty')
+              if [ -n "$YT_ERROR" ]; then
+                echo "FAILURE: clip rendered but private YouTube upload failed: $YT_ERROR"
+                exit 1
+              fi
             fi
             if [ "$STATUS" = "error" ]; then
               echo "FAILURE: $(echo "$ITEM" | jq -r '.error // "unknown error"')"
