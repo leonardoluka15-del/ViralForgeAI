@@ -94,6 +94,15 @@ def youtube_callback(request: Request, state: str = '', code: str = ''):
     <p>After saving it in Render, redeploy ViralForge. Then the server can upload to your YouTube channel without you being present.</p>
     </body></html>""")
 
+
+def _require_automation_secret(request: Request):
+    expected=os.getenv("AUTOMATION_SECRET","").strip()
+    if not expected:
+        raise HTTPException(503,"Automation secret is not configured.")
+    supplied=(request.headers.get("Authorization") or "").strip()
+    if not secrets.compare_digest(supplied, f"Bearer {expected}"):
+        raise HTTPException(401,"Unauthorized automation request.")
+
 def youtube_credentials():
     cid = os.getenv('YOUTUBE_CLIENT_ID','').strip()
     secret = os.getenv('YOUTUBE_CLIENT_SECRET','').strip()
@@ -587,7 +596,8 @@ def _process_direct_source(queue_id: str):
                 item["error"]=str(e)[:500]
 
 @app.post('/api/free-source/process')
-def api_free_source_process(payload: dict, background_tasks: BackgroundTasks):
+def api_free_source_process(payload: dict, background_tasks: BackgroundTasks, request: Request):
+    _require_automation_secret(request)
     source_url=(payload.get("source_url") or "").strip()
     if not source_url.startswith("https://"):
         raise HTTPException(400,"A HTTPS video source_url is required.")
@@ -748,7 +758,8 @@ def api_opusclip_project(project_id: str):
     return {"project_id":project_id,"ready":bool(ready),"clips":ready}
 
 @app.post('/api/cloud-provider/dispatch')
-def api_cloud_provider_dispatch(payload: dict):
+def api_cloud_provider_dispatch(payload: dict, request: Request):
+    _require_automation_secret(request)
     source_url=(payload.get("source_url") or "").strip()
     if not source_url:
         raise HTTPException(400,"source_url is required")
@@ -768,113 +779,15 @@ def api_cloud_provider_dispatch(payload: dict):
 
 @app.get('/api/worker/next')
 def worker_next():
-    with lock:
-        pending = next((x for x in worker_jobs if x.get('status') == 'pending'), None)
-        if pending:
-            pending['status'] = 'claimed'
-            pending['claimed_at'] = datetime.now(timezone.utc).isoformat()
-            return pending
-
-        item = next((x for x in content_queue if x.get('status') in {'idea_ready','queued_for_local_worker'}), None)
-
-    if item is None:
-        picked = _auto_pick_trend()
-        if not picked:
-            return {'job': None}
-        qid = 'auto_' + uuid.uuid4().hex[:10]
-        item = {
-            'id': qid,
-            'status': 'cloud_worker_claimed',
-            'source_video_id': picked['video_id'],
-            'source_url': picked['url'],
-            'source_title': picked['title'],
-            'source_channel': picked['channel'],
-            'views': picked['views'],
-            'views_per_hour': picked['views_per_hour'],
-            'trend_score': min(100, int(55 + min(picked['views_per_hour']/10000,45))),
-            'title': (picked['title'][:88] + ' #Shorts')[:100],
-            'description': f"Trending clip from {picked['channel']}. Source: {picked['url']}\n\n#Shorts #Trending",
-            'created_at': datetime.now(timezone.utc).isoformat()
-        }
-        with lock:
-            content_queue.insert(0,item)
-    else:
-        with lock:
-            item['status']='cloud_worker_claimed'
-
-    job = {
-        'id': item['id'],
-        'source_url': item.get('source_url'),
-        'source_video_id': item.get('source_video_id'),
-        'source_title': item.get('source_title'),
-        'source_channel': item.get('source_channel'),
-        'target_length': 30,
-        'status': 'claimed',
-        'claimed_at': datetime.now(timezone.utc).isoformat()
-    }
-    with lock:
-        worker_jobs.append(job)
-    return job
+    raise HTTPException(410,'Legacy cloud worker is disabled. ViralForge now uses licensed direct sources or configured provider adapters.')
 
 @app.post('/api/worker/{job_id}/progress')
-def worker_progress(job_id: str, status: str = Form(...), message: str = Form('')):
-    with lock:
-        q = _queue_lookup(job_id)
-        if q:
-            q['status'] = status
-            q['worker_message'] = message[:300]
-        j = next((x for x in worker_jobs if x.get('id') == job_id), None)
-        if j:
-            j['status'] = status
-            j['message'] = message[:300]
-    return {'ok': True}
+def worker_progress(job_id: str):
+    raise HTTPException(410,'Legacy cloud worker is disabled.')
 
 @app.post('/api/worker/{job_id}/complete')
-async def worker_complete(job_id: str, video: UploadFile = File(...)):
-    with lock:
-        q = _queue_lookup(job_id)
-        if not q:
-            raise HTTPException(404,'Queue item not found.')
-        meta = dict(q)
-
-    outdir = OUTPUTS / f"worker_{job_id}"
-    outdir.mkdir(parents=True, exist_ok=True)
-    final_path = outdir / 'viral_short.mp4'
-    with final_path.open('wb') as f:
-        shutil.copyfileobj(video.file, f)
-
-    yt_result = None
-    try:
-        yt = build('youtube','v3',credentials=youtube_credentials(),cache_discovery=False)
-        title = (meta.get('title') or meta.get('source_title') or 'Trending Short')[:100]
-        description = (meta.get('description') or
-            f"Source: {meta.get('source_channel','YouTube')}\n{meta.get('source_url','')}\n\n#Shorts #Trending")
-        body = {
-            'snippet': {'title': title, 'description': description, 'categoryId': '24'},
-            'status': {'privacyStatus': 'private', 'selfDeclaredMadeForKids': False}
-        }
-        media = MediaFileUpload(str(final_path), mimetype='video/mp4', resumable=True, chunksize=8*1024*1024)
-        req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
-        response=None
-        while response is None:
-            _,response=req.next_chunk()
-        yt_result={'video_id':response.get('id'),'youtube_url':f"https://www.youtube.com/watch?v={response.get('id')}"}
-    except Exception as e:
-        yt_result={'error':str(e)[:400]}
-
-    with lock:
-        q = _queue_lookup(job_id)
-        if q:
-            q['status']='published_youtube' if yt_result and yt_result.get('video_id') else 'video_ready'
-            q['media_url']=f"/media/worker_{job_id}/viral_short.mp4"
-            q['worker_message']='Cloud worker finished the AI clip.'
-            q['youtube']=yt_result
-        j = next((x for x in worker_jobs if x.get('id') == job_id), None)
-        if j:
-            j['status']='published_youtube' if yt_result and yt_result.get('video_id') else 'video_ready'
-            j['media_url']=f"/media/worker_{job_id}/viral_short.mp4"
-            j['youtube']=yt_result
-    return {'ok': True, 'media_url': f"/media/worker_{job_id}/viral_short.mp4", 'youtube': yt_result}
+def worker_complete(job_id: str):
+    raise HTTPException(410,'Legacy cloud worker is disabled.')
 
 @app.get('/api/queue')
 def get_queue():
