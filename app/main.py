@@ -249,36 +249,90 @@ async def queue_from_trend(
     low = clean_title.lower()
 
     if any(k in low for k in ['trailer','teaser','movie','film','netflix','marvel','dc','disney','prime video']):
-        angle = 'Explain why this trailer is trending and highlight the most talked-about reveal without reposting the full trailer.'
-        hook = f"Everyone is talking about {clean_title[:70]} — here’s the moment people noticed."
+        angle = 'Explain why this trailer is trending and highlight the most talked-about reveal.'
+        hook = f"Everyone is talking about {clean_title[:70]} — here’s what people noticed."
     elif any(k in low for k in ['mrbeast','challenge','giveaway','survive','million']):
-        angle = 'Create a commentary-style recap focused on the surprising premise, stakes, and audience reaction.'
+        angle = 'Create a fast commentary-style recap focused on the premise, stakes, and audience reaction.'
         hook = f"This is why {clean_title[:70]} is exploding right now."
     elif any(k in low for k in ['game','gaming','playstation','xbox','nintendo','fortnite','gta','minecraft']):
         angle = 'Create a fast gaming-news Short explaining the announcement and why fans care.'
         hook = f"Gamers are reacting fast to {clean_title[:70]}."
     else:
-        angle = 'Create a short commentary recap explaining what happened, why it is trending, and the most interesting takeaway.'
+        angle = 'Create a short commentary recap explaining what happened, why it is trending, and the key takeaway.'
         hook = f"This video is taking off fast — here’s why: {clean_title[:70]}"
 
     generated_title = clean_title[:88] if clean_title else 'Trending video explained'
     if len(generated_title) < 90 and not generated_title.endswith('...'):
         generated_title = generated_title.rstrip(' .') + ' — Why It’s Trending'
 
-    description = f"{angle}\n\nSource: {channel or 'YouTube'}\n#Shorts #Trending #Viral"
+    description = f"{angle}\n\nTrend reference: {channel or 'YouTube'}\n#Shorts #Trending #Viral"
     hashtags = ['#Shorts','#Trending','#Viral']
     if channel:
         safe_tag = ''.join(ch for ch in channel.title().replace(' ','') if ch.isalnum())
         if safe_tag:
             hashtags.append('#'+safe_tag[:24])
 
+    # Resolve a processable real-video source immediately.
+    trend_terms=_trend_search_terms(clean_title)
+    search_queries=[]
+    if trend_terms:
+        search_queries.append(" ".join(trend_terms[:4]))
+        if len(trend_terms)>=2:
+            search_queries.append(" ".join(trend_terms[-2:]))
+        search_queries.extend([w for w in trend_terms if len(w)>=5])
+
+    source=None
+    used_query=None
+    for query in search_queries:
+        try:
+            items=_commons_search_videos(query,12)
+        except Exception:
+            items=[]
+        items=[x for x in items if (x.get("size") or 0) <= 40*1024*1024]
+        if trend_terms:
+            meaningful={w for w in trend_terms if len(w)>=4}
+            matched=[]
+            for x in items:
+                hay=((x.get("title") or "")+" "+(x.get("description") or "")).lower()
+                if any(w in hay for w in meaningful):
+                    matched.append(x)
+            items=matched
+        if items:
+            items.sort(key=lambda x:(0 if (x.get("height") or 0)>=(x.get("width") or 0) else 1,x.get("size") or 10**12))
+            source=items[0]
+            used_query=query
+            break
+
+    # Safe fallback keeps the queue clip-ready instead of YouTube-only.
+    if not source:
+        for query in ["technology","science","nature","city","animals","sports"]:
+            try:
+                items=_commons_search_videos(query,8)
+            except Exception:
+                items=[]
+            items=[x for x in items if (x.get("size") or 0) <= 25*1024*1024]
+            if items:
+                source=items[0]
+                used_query=query
+                break
+
+    if not source:
+        raise HTTPException(404,"No clip-ready real video source could be found for this trend.")
+
     item = {
         'id': qid,
         'status': 'idea_ready',
         'source_video_id': video_id,
-        'source_url': source_url or f"https://www.youtube.com/watch?v={video_id}",
-        'source_title': clean_title,
-        'source_channel': channel,
+        'trend_reference_url': source_url or f"https://www.youtube.com/watch?v={video_id}",
+        'trend_reference_title': clean_title,
+        'trend_reference_channel': channel,
+        'source_url': source.get('source_url'),
+        'production_source_url': source.get('source_url'),
+        'source_title': source.get('title') or clean_title,
+        'source_channel': 'Wikimedia Commons',
+        'source_license': source.get('license'),
+        'source_credit': source.get('credit') or source.get('artist'),
+        'source_query': used_query,
         'views': int(views or 0),
         'views_per_hour': int(views_per_hour or 0),
         'trend_score': int(trend_score or 0),
@@ -287,7 +341,8 @@ async def queue_from_trend(
         'title': generated_title[:100],
         'description': description,
         'hashtags': hashtags,
-        'created_at': datetime.now(timezone.utc).isoformat()
+        'created_at': datetime.now(timezone.utc).isoformat(),
+        'clip_ready': True
     }
     with lock:
         content_queue.insert(0,item)
