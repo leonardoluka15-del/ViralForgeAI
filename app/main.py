@@ -398,6 +398,16 @@ def _run_trend_generation(queue_id):
                 item['status']='error'
                 item['error']=str(e)[:500]
 
+def _google_drive_direct_url(url: str):
+    u=(url or "").strip()
+    m=re.search(r"drive\.google\.com/file/d/([^/]+)",u)
+    if not m:
+        m=re.search(r"[?&]id=([^&]+)",u)
+    if not m:
+        return None
+    file_id=m.group(1)
+    return f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t"
+
 def _looks_like_direct_video_url(url: str) -> bool:
     low=(url or "").lower().split("?",1)[0]
     return low.startswith(("http://","https://")) and low.endswith((".mp4",".webm",".mov",".m4v",".avi"))
@@ -445,6 +455,15 @@ def generate_queue_video(queue_id: str, background_tasks: BackgroundTasks):
             return {"ok":True,"status":item.get("status")}
         item.pop("error",None)
         source_url=(item.get("production_source_url") or item.get("source_url") or "").strip()
+    drive_url=_google_drive_direct_url(source_url)
+    if drive_url:
+        with lock:
+            item=_queue_lookup(queue_id)
+            if item:
+                item["production_source_url"]=drive_url
+                item["status"]="queued"
+        background_tasks.add_task(_process_direct_source,queue_id)
+        return {"ok":True,"status":"queued","mode":"google_drive"}
 
     if _looks_like_direct_video_url(source_url):
         with lock:
