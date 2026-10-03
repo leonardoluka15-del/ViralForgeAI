@@ -25,8 +25,8 @@ def duration(src):
 def transcribe(src, update):
     update(12, 'Transcribing speech with Whisper AI…')
     from faster_whisper import WhisperModel
-    model = WhisperModel('base', device='cpu', compute_type='int8')
-    segs, _ = model.transcribe(str(src), vad_filter=True, word_timestamps=True, beam_size=3)
+    model = WhisperModel('tiny', device='cpu', compute_type='int8', cpu_threads=1, num_workers=1)
+    segs, _ = model.transcribe(str(src), vad_filter=True, word_timestamps=True, beam_size=1)
     data=[]
     for s in segs:
         txt=s.text.strip()
@@ -38,7 +38,7 @@ def visual_energy(src, update):
     update(33, 'Detecting motion, cuts and visual peaks…')
     cap=cv2.VideoCapture(str(src))
     fps=cap.get(cv2.CAP_PROP_FPS) or 25.0
-    sample=max(1,int(fps*0.75))
+    sample=max(1,int(fps*1.5))
     prev=None; i=0; scores=[]
     while True:
         ok,frame=cap.read()
