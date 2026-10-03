@@ -145,14 +145,14 @@ def export(src,out,start,end,srt):
         vf += f",subtitles='{esc(srt)}':force_style='FontName=Arial,FontSize=19,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=155'"
     run(['ffmpeg','-y','-ss',f'{start:.3f}','-i',str(src),'-t',f'{end-start:.3f}','-vf',vf,'-c:v','libx264','-preset','veryfast','-crf','21','-c:a','aac','-b:a','160k','-movflags','+faststart',str(out)])
 
-def process_video(src,outdir,update,clip_length=35):
+def process_video(src,outdir,update,clip_length=35,max_clips=6):
     outdir.mkdir(parents=True,exist_ok=True)
     update(6,'Inspecting video…')
     total=duration(src)
     segs=transcribe(src,update)
     vis=visual_energy(src,update)
     update(53,'AI is scoring hooks, pacing and visual energy…')
-    picks=rank(candidates(total,segs,clip_length),vis)
+    picks=rank(candidates(total,segs,clip_length),vis)[:max(1,int(max_clips))]
     if not picks:
         picks=[{'start':0,'end':min(total,clip_length),'text':'AI-selected opening moment','score':72,'rank':1,'reason':'fallback selection'}]
     clips=[]
