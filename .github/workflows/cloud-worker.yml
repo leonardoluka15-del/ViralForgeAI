@@ -7,10 +7,6 @@ on:
       - "cloud_worker.py"
       - ".github/workflows/cloud-worker.yml"
   workflow_dispatch:
-  schedule:
-    - cron: "0 16 * * *"
-    - cron: "0 21 * * *"
-    - cron: "30 0 * * *"
 
 permissions:
   contents: read
