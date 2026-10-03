@@ -2,7 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPExcept
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
-import uuid, shutil, threading, urllib.parse, urllib.request, os, secrets, subprocess, re
+import uuid, shutil, threading, urllib.parse, urllib.request, os, secrets, subprocess, re, time
 from datetime import datetime, timezone
 import yt_dlp
 from google_auth_oauthlib.flow import Flow
@@ -651,6 +651,159 @@ def _commons_search_videos(query: str, limit: int = 12):
     return rows[:max(1,min(limit,25))]
 
 
+def _archive_license_ok(meta: dict) -> bool:
+    text=" ".join(str(meta.get(k) or "") for k in ["licenseurl","rights","description"]).lower()
+    return (
+        "creativecommons.org" in text or
+        "public domain" in text or
+        "cc0" in text or
+        "creative commons" in text
+    )
+
+def _archive_search_videos(query: str, limit: int = 8):
+    q=f'mediatype:movies AND ({query})'
+    params={
+        "q":q,
+        "fl[]":["identifier","title","description"],
+        "rows":max(5,min(limit*2,20)),
+        "page":1,
+        "output":"json"
+    }
+    r=requests.get(
+        "https://archive.org/advancedsearch.php",
+        params=params,timeout=30,
+        headers={"User-Agent":"ViralForgeAI/1.0 (+https://github.com/leonardoluka15-del/ViralForgeAI)"}
+    )
+    r.raise_for_status()
+    docs=((r.json().get("response") or {}).get("docs") or [])
+    rows=[]
+    for doc in docs:
+        ident=(doc.get("identifier") or "").strip()
+        if not ident:
+            continue
+        try:
+            mr=requests.get(
+                f"https://archive.org/metadata/{urllib.parse.quote(ident,safe='')}",
+                timeout=25,
+                headers={"User-Agent":"ViralForgeAI/1.0 (+https://github.com/leonardoluka15-del/ViralForgeAI)"}
+            )
+            mr.raise_for_status()
+            data=mr.json()
+        except Exception:
+            continue
+        meta=data.get("metadata") or {}
+        if not _archive_license_ok(meta):
+            continue
+        files=data.get("files") or []
+        candidates=[]
+        for ff in files:
+            name=(ff.get("name") or "")
+            low=name.lower()
+            if not low.endswith((".mp4",".m4v",".webm")):
+                continue
+            try:
+                size=int(ff.get("size") or 0)
+            except Exception:
+                size=0
+            if size and size > 80*1024*1024:
+                continue
+            candidates.append((0 if low.endswith(".mp4") else 1,size or 10**12,name))
+        if not candidates:
+            continue
+        candidates.sort()
+        _,size,name=candidates[0]
+        direct=f"https://archive.org/download/{urllib.parse.quote(ident,safe='')}/{urllib.parse.quote(name)}"
+        lic=meta.get("licenseurl") or meta.get("rights") or "Creative Commons / Public Domain"
+        rows.append({
+            "title":meta.get("title") or doc.get("title") or ident,
+            "source_url":direct,
+            "description":str(meta.get("description") or doc.get("description") or ""),
+            "artist":str(meta.get("creator") or ""),
+            "credit":str(meta.get("creator") or "Internet Archive"),
+            "license":str(lic),
+            "license_url":str(meta.get("licenseurl") or ""),
+            "size":size if isinstance(size,int) else 0,
+            "mime":"video/mp4" if name.lower().endswith(".mp4") else "video/webm",
+            "commons_page":f"https://archive.org/details/{urllib.parse.quote(ident,safe='')}",
+            "provider":"Internet Archive"
+        })
+        if len(rows)>=limit:
+            break
+    return rows
+
+def _clean_media_url(url: str) -> str:
+    try:
+        parts=urllib.parse.urlsplit(url or "")
+        query=urllib.parse.parse_qsl(parts.query,keep_blank_values=True)
+        query=[(k,v) for k,v in query if not k.lower().startswith("utm_")]
+        return urllib.parse.urlunsplit((parts.scheme,parts.netloc,parts.path,urllib.parse.urlencode(query),parts.fragment))
+    except Exception:
+        return url or ""
+
+def _download_video_source(url: str, dest: Path):
+    clean=_clean_media_url(url)
+    headers={
+        "User-Agent":"ViralForgeAI/1.0 (+https://github.com/leonardoluka15-del/ViralForgeAI)",
+        "Accept":"video/*,*/*;q=0.8"
+    }
+    last=None
+    for attempt in range(3):
+        try:
+            with requests.get(clean,stream=True,timeout=(15,120),headers=headers,allow_redirects=True) as r:
+                if r.status_code==429:
+                    last=RuntimeError(f"Source host rate-limited the download (HTTP 429).")
+                    retry=r.headers.get("Retry-After")
+                    wait=min(12,max(2,int(retry) if retry and retry.isdigit() else 2**(attempt+1)))
+                    time.sleep(wait)
+                    continue
+                r.raise_for_status()
+                total=int(r.headers.get("content-length") or 0)
+                if total and total > 120*1024*1024:
+                    raise RuntimeError("Source video is larger than the 120 MB cloud limit.")
+                written=0
+                with dest.open("wb") as fh:
+                    for chunk in r.iter_content(chunk_size=1024*1024):
+                        if not chunk:
+                            continue
+                        written+=len(chunk)
+                        if written > 120*1024*1024:
+                            raise RuntimeError("Source video exceeded the 120 MB cloud limit.")
+                        fh.write(chunk)
+                if written < 1024:
+                    raise RuntimeError("Downloaded source video was empty.")
+                return clean
+        except Exception as e:
+            last=e
+            if attempt<2:
+                time.sleep(2**(attempt+1))
+    raise last or RuntimeError("Could not download source video.")
+
+def _fallback_sources_for_item(item: dict, exclude_url: str = ""):
+    queries=[]
+    title=item.get("trend_reference_title") or item.get("source_title") or ""
+    terms=_trend_search_terms(title)
+    if item.get("source_query"):
+        queries.append(item.get("source_query"))
+    if terms:
+        queries.append(" ".join(terms[:4]))
+        queries.extend([x for x in terms if len(x)>=5])
+    queries.extend(["technology","science","nature","city","animals","sports"])
+    seen={_clean_media_url(exclude_url)}
+    for query in queries:
+        if not query:
+            continue
+        for finder in (_commons_search_videos,_archive_search_videos):
+            try:
+                rows=finder(query,6)
+            except Exception:
+                rows=[]
+            for row in rows:
+                u=_clean_media_url(row.get("source_url") or "")
+                if not u or u in seen:
+                    continue
+                seen.add(u)
+                yield row
+
 def _trend_search_terms(title: str):
     stop={
         "official","trailer","teaser","video","clip","shorts","short","new","full",
@@ -851,20 +1004,35 @@ def _process_direct_source(queue_id: str):
     outdir.mkdir(parents=True,exist_ok=True)
     src=outdir/"source.mp4"
     try:
-        with requests.get(src_url,stream=True,timeout=(15,120),headers={"User-Agent":"ViralForgeAI/1.0"}) as r:
-            r.raise_for_status()
-            total=int(r.headers.get("content-length") or 0)
-            if total and total > 120*1024*1024:
-                raise RuntimeError("Source video is larger than the 120 MB cloud test limit.")
-            written=0
-            with src.open("wb") as fh:
-                for chunk in r.iter_content(chunk_size=1024*1024):
-                    if not chunk:
-                        continue
-                    written += len(chunk)
-                    if written > 120*1024*1024:
-                        raise RuntimeError("Source video exceeded the 120 MB cloud test limit.")
-                    fh.write(chunk)
+        downloaded_url=None
+        try:
+            downloaded_url=_download_video_source(src_url,src)
+        except Exception as first_error:
+            fallback_error=first_error
+            found=False
+            for alt in _fallback_sources_for_item(item,src_url):
+                try:
+                    if src.exists():
+                        src.unlink()
+                    downloaded_url=_download_video_source(alt.get("source_url"),src)
+                    with lock:
+                        current=_queue_lookup(queue_id)
+                        if current:
+                            current["production_source_url"]=downloaded_url
+                            current["source_url"]=downloaded_url
+                            current["source_title"]=alt.get("title") or current.get("source_title")
+                            current["source_channel"]=alt.get("provider") or ("Wikimedia Commons" if "wikimedia" in downloaded_url else "Internet Archive")
+                            current["license"]=alt.get("license") or current.get("license")
+                            current["license_url"]=alt.get("license_url") or current.get("license_url")
+                            current["credit"]=alt.get("credit") or alt.get("artist") or current.get("credit")
+                            current["fallback_used"]=True
+                    found=True
+                    break
+                except Exception as alt_error:
+                    fallback_error=alt_error
+                    continue
+            if not found:
+                raise RuntimeError(f"All free source hosts failed. Last error: {fallback_error}")
         with lock:
             item=_queue_lookup(queue_id)
             if item:
