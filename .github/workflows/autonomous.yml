@@ -1,0 +1,38 @@
+name: ViralForge Autonomous Scheduler
+
+on:
+  push:
+    paths:
+      - ".github/workflows/autonomous.yml"
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0,8,16 * * *"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Request GitHub OIDC token and trigger ViralForge
+        shell: bash
+        run: |
+          set -euo pipefail
+          OIDC_JSON=$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=viralforge-ai")
+          TOKEN=$(echo "$OIDC_JSON" | jq -r '.value')
+          test -n "$TOKEN" && test "$TOKEN" != "null"
+
+          RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
+            -X POST "https://viralforge-ai-jwuo.onrender.com/api/automation/run-once" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            --data '{}')
+
+          echo "$RESPONSE"
+          CODE=$(echo "$RESPONSE" | sed -n 's/^HTTP_STATUS://p')
+          test "$CODE" = "200"
