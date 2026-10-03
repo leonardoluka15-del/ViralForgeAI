@@ -14,7 +14,7 @@ def main():
     r=requests.get(f"{API}/api/worker/next",timeout=45)
     r.raise_for_status()
     job=r.json()
-    if not job or job.get("job") is None:
+    if not job or not job.get("id"):
         print("No queued trend.")
         return
 
@@ -40,7 +40,7 @@ def main():
         def update(p,m):
             requests.post(f"{API}/api/worker/{jid}/progress",
                           data={"status":"cloud_analyzing","message":m},timeout=30)
-        clips=process_video(src,out,update,clip_length=target)
+        clips=process_video(src,out,update,clip_length=target,max_clips=1)
         if not clips:
             raise RuntimeError("AI did not produce a clip.")
         best=out/"viral_clip_1.mp4"
