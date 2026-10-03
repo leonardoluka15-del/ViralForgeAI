@@ -1,0 +1,12 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Viral Clipper</title><link rel="stylesheet" href="/static/style.css"></head>
+<body><main class="wrap">
+<header><div><h1>Viral Clipper</h1><p>Local AI clipping — original source quality, captions, viral scoring.</p></div><span id="health" class="pill">Checking engine…</span></header>
+<section class="panel grid">
+<div><h2>1. Source</h2><div class="tabs"><button class="tab active" data-tab="upload">Upload video</button><button class="tab" data-tab="url">Video URL</button></div>
+<div id="uploadBox"><label class="drop" id="drop"><input id="file" type="file" accept="video/*"><b>Choose or drop video</b><span id="fname">MP4, MOV, MKV, WebM</span></label></div>
+<div id="urlBox" hidden><input id="url" class="input" placeholder="Paste a public video URL"></div></div>
+<div><h2>2. Clip settings</h2><label>Number of clips <b id="countLabel">5</b></label><input id="count" type="range" min="1" max="10" value="5"><div class="row"><label>Min seconds<input id="min" type="number" value="25" min="10" max="90"></label><label>Max seconds<input id="max" type="number" value="60" min="20" max="120"></label></div><button id="go" class="primary">Find viral moments</button></div>
+</section>
+<section id="status" class="panel" hidden><div class="statusline"><b id="statusText">Starting…</b><span id="pct">0%</span></div><div class="bar"><i id="bar"></i></div></section>
+<section id="results"><div class="empty"><h2>Your viral clips will appear here</h2><p>Each result includes preview, score, timestamps, title and MP4 download.</p></div></section>
+</main><script src="/static/app.js"></script></body></html>
