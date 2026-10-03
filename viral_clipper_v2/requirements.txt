@@ -1,0 +1,11 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+python-multipart==0.0.20
+jinja2==3.1.6
+faster-whisper==1.1.1
+httpx==0.28.1
+pydantic==2.11.4
+numpy==2.2.5
+opencv-python-headless==4.11.0.86
+soundfile==0.13.1
+yt-dlp[default]
