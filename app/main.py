@@ -1,9 +1,12 @@
-from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
-import uuid, shutil, threading, urllib.parse
+import uuid, shutil, threading, urllib.parse, os, secrets
 import yt_dlp
+from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
 from .pipeline import process_video
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +30,71 @@ def home():
 @app.get('/health')
 def health():
     return {'ok': True, 'service': 'ViralForge AI'}
+
+YOUTUBE_SCOPES = ['https://www.googleapis.com/auth/youtube.upload','https://www.googleapis.com/auth/youtube.readonly']
+YOUTUBE_REDIRECT = 'https://viralforge-ai-jwuo.onrender.com/youtube/callback'
+oauth_states = set()
+
+def youtube_client_config():
+    cid = os.getenv('YOUTUBE_CLIENT_ID','').strip()
+    secret = os.getenv('YOUTUBE_CLIENT_SECRET','').strip()
+    if not cid or not secret:
+        raise HTTPException(503, 'YouTube OAuth is not configured yet. Add YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET in Render Environment.')
+    return {
+        'web': {
+            'client_id': cid,
+            'client_secret': secret,
+            'auth_uri': 'https://accounts.google.com/o/oauth2/auth',
+            'token_uri': 'https://oauth2.googleapis.com/token',
+            'redirect_uris': [YOUTUBE_REDIRECT],
+        }
+    }
+
+@app.get('/youtube/connect')
+def youtube_connect():
+    flow = Flow.from_client_config(youtube_client_config(), scopes=YOUTUBE_SCOPES, redirect_uri=YOUTUBE_REDIRECT)
+    state = secrets.token_urlsafe(24)
+    oauth_states.add(state)
+    url, _ = flow.authorization_url(
+        access_type='offline',
+        include_granted_scopes='true',
+        prompt='consent',
+        state=state
+    )
+    return RedirectResponse(url)
+
+@app.get('/youtube/callback', response_class=HTMLResponse)
+def youtube_callback(request: Request, state: str = '', code: str = ''):
+    if not state or state not in oauth_states:
+        raise HTTPException(400, 'Invalid or expired OAuth state. Start again from /youtube/connect.')
+    oauth_states.discard(state)
+    flow = Flow.from_client_config(
+        youtube_client_config(),
+        scopes=YOUTUBE_SCOPES,
+        state=state,
+        redirect_uri=YOUTUBE_REDIRECT
+    )
+    flow.fetch_token(code=code)
+    creds = flow.credentials
+    refresh = creds.refresh_token or ''
+    if not refresh:
+        return HTMLResponse('<h2>No refresh token was returned.</h2><p>Revoke the app in your Google account and connect again with consent.</p>', status_code=400)
+    safe = refresh.replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
+    return HTMLResponse(f"""<!doctype html><html><body style="font-family:system-ui;background:#0b0d10;color:white;padding:40px;max-width:900px;margin:auto">
+    <h1 style="color:#c9ff3d">YouTube connected</h1>
+    <p>Copy the token below and paste it directly into Render as <b>YOUTUBE_REFRESH_TOKEN</b>.</p>
+    <p><b>Do not send this token in ChatGPT, email, or messages.</b></p>
+    <textarea readonly style="width:100%;height:120px;background:#15181e;color:white;border:1px solid #444;border-radius:10px;padding:12px">{safe}</textarea>
+    <p>After saving it in Render, redeploy ViralForge. Then the server can upload to your YouTube channel without you being present.</p>
+    </body></html>""")
+
+@app.get('/api/youtube/status')
+def youtube_status():
+    cid = bool(os.getenv('YOUTUBE_CLIENT_ID','').strip())
+    secret = bool(os.getenv('YOUTUBE_CLIENT_SECRET','').strip())
+    refresh = bool(os.getenv('YOUTUBE_REFRESH_TOKEN','').strip())
+    return {'configured': cid and secret and refresh, 'client_id': cid, 'client_secret': secret, 'refresh_token': refresh}
+
 
 @app.post('/api/jobs')
 async def create_job(background_tasks: BackgroundTasks, video: UploadFile | None = File(None), video_url: str = Form(''), clip_length: int = Form(35)):
