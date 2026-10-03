@@ -25,7 +25,7 @@ def duration(src):
 def transcribe(src, update):
     update(12, 'Transcribing speech with Whisper AI…')
     from faster_whisper import WhisperModel
-    model = WhisperModel('small', device='cpu', compute_type='int8')
+    model = WhisperModel('base', device='cpu', compute_type='int8')
     segs, _ = model.transcribe(str(src), vad_filter=True, word_timestamps=True, beam_size=3)
     data=[]
     for s in segs:
@@ -140,7 +140,7 @@ def esc(p):
     return str(p).replace('\\','/').replace(':','\\:').replace("'","\\'")
 
 def export(src,out,start,end,srt):
-    vf="scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
+    vf="scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280"
     if srt.exists() and srt.stat().st_size:
         vf += f",subtitles='{esc(srt)}':force_style='FontName=Arial,FontSize=19,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=4,Shadow=0,Alignment=2,MarginV=155'"
     run(['ffmpeg','-y','-ss',f'{start:.3f}','-i',str(src),'-t',f'{end-start:.3f}','-vf',vf,'-c:v','libx264','-preset','veryfast','-crf','21','-c:a','aac','-b:a','160k','-movflags','+faststart',str(out)])
