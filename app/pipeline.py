@@ -198,11 +198,15 @@ def export(src,out,start,end,srt):
      '-vf',vf,'-threads','1','-c:v','libx264','-preset','ultrafast','-crf','24',
      '-c:a','aac','-b:a','96k','-movflags','+faststart',str(out)])
 
-def process_video(src,outdir,update,clip_length=35,max_clips=6):
+def process_video(src,outdir,update,clip_length=35,max_clips=6,skip_transcription=False):
     outdir.mkdir(parents=True,exist_ok=True)
     update(6,'Inspecting video…')
     total=duration(src)
-    segs=transcribe(src,update)
+    if skip_transcription:
+        update(12,'Fast trend mode — skipping speech model download…')
+        segs=[]
+    else:
+        segs=transcribe(src,update)
     vis=visual_energy(src,update)
     update(53,'AI is scoring hooks, pacing and visual energy…')
     picks=rank(candidates(total,segs,clip_length),vis)[:max(1,int(max_clips))]
