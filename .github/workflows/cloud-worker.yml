@@ -1,0 +1,26 @@
+name: ViralForge Cloud Clip Worker
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
+
+jobs:
+  clip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade pip
+          pip install yt-dlp requests faster-whisper opencv-python-headless numpy
+
+      - name: Run cloud worker
+        env:
+          VIRALFORGE_URL: https://viralforge-ai-jwuo.onrender.com
+        run: python cloud_worker.py
