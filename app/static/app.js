@@ -20,3 +20,36 @@ function render(clips){grid.innerHTML=clips.map(c=>`<article class="clip"><video
 async function checkYT(){const s=$('#yt-status'),d=$('#yt-detail');if(!s)return;try{const r=await fetch('/api/youtube/status');const j=await r.json();if(j.authorized){s.textContent='● '+(j.channel_title||'YouTube connected');s.classList.add('ok');d.textContent='Authorized • '+(j.subscribers||'0')+' subscribers'}else if(j.configured){s.textContent='YouTube needs attention';d.textContent=j.error||'Authorization check failed'}else{s.textContent='YouTube not configured';d.textContent='Add credentials in Render'}}catch(e){s.textContent='YouTube status unavailable';d.textContent=e.message}}
 async function publishYT(rank,btn){if(!currentJobId)return alert('Process a video first.');const old=btn.textContent;btn.disabled=true;btn.textContent='Uploading…';const fd=new FormData();fd.append('job_id',currentJobId);fd.append('rank',rank);fd.append('privacy','private');try{const r=await fetch('/api/youtube/upload',{method:'POST',body:fd});const j=await r.json();if(!r.ok)throw Error(j.detail||'Upload failed');btn.textContent='Uploaded ✓';btn.classList.add('done');alert('Uploaded privately to your YouTube channel. Video ID: '+j.video_id)}catch(e){btn.disabled=false;btn.textContent=old;alert(e.message)}}
 checkYT();
+
+const trendGrid=$('#trend-grid'),trendStatus=$('#trend-status'),trendRegion=$('#trend-region'),refreshTrends=$('#refresh-trends');
+function fmt(n){return new Intl.NumberFormat('en',{notation:'compact',maximumFractionDigits:1}).format(Number(n||0))}
+async function loadTrends(){
+  if(!trendGrid||!trendStatus)return;
+  trendStatus.textContent='Loading current YouTube trends…';
+  refreshTrends && (refreshTrends.disabled=true);
+  try{
+    const r=await fetch('/api/trends?region='+(trendRegion?.value||'US')+'&max_results=24');
+    const raw=await r.text(); let j;
+    try{j=JSON.parse(raw)}catch(_){throw Error(raw||'Trend Scout returned an invalid response')}
+    if(!r.ok)throw Error(j.detail||'Trend Scout failed');
+    trendGrid.innerHTML=(j.items||[]).map(t=>`<article class="trend-card">
+      <a class="trend-thumb" href="${t.url}" target="_blank" rel="noopener"><img src="${t.thumbnail||''}" alt=""></a>
+      <div class="trend-body">
+        <div class="trend-top"><span class="trend-rank">#${t.rank}</span><span class="trend-score">✦ ${t.trend_score}/100</span></div>
+        <h3>${esc(t.title||'Untitled')}</h3>
+        <p class="trend-channel">${esc(t.channel||'Unknown channel')}</p>
+        <div class="trend-metrics"><span><b>${fmt(t.views)}</b> views</span><span><b>${fmt(t.views_per_hour)}</b>/hr</span><span><b>${t.age_hours}h</b> old</span></div>
+        <a class="trend-open" href="${t.url}" target="_blank" rel="noopener">Open source video ↗</a>
+      </div>
+    </article>`).join('');
+    trendStatus.textContent=`${j.count||0} current trends ranked by momentum`;
+  }catch(e){
+    trendStatus.textContent='Could not load trends: '+e.message;
+    trendGrid.innerHTML='';
+  }finally{
+    refreshTrends && (refreshTrends.disabled=false);
+  }
+}
+refreshTrends && (refreshTrends.onclick=loadTrends);
+trendRegion && (trendRegion.onchange=loadTrends);
+loadTrends();
