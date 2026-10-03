@@ -37,6 +37,7 @@ def pick_caption_window(events,target,duration):
 
 def browser_segment(video_id,outdir,target):
     from playwright.sync_api import sync_playwright
+    media_urls=[]
     with sync_playwright() as p:
         browser=p.chromium.launch(
             headless=True,
@@ -46,52 +47,98 @@ def browser_segment(video_id,outdir,target):
             viewport={"width":1280,"height":720},
             user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140 Safari/537.36"
         )
-        url=f"https://www.youtube.com/embed/{video_id}?autoplay=1&controls=0&rel=0"
-        page.goto(url,wait_until="domcontentloaded",timeout=90000)
-        page.wait_for_timeout(5000)
-        data=page.evaluate("""() => {
-          let p = window.ytInitialPlayerResponse || window.ytplayer?.config?.args?.raw_player_response || window.ytplayer?.config?.args?.player_response;
-          if (typeof p === 'string') { try { p=JSON.parse(p); } catch(e) {} }
-          return p || null;
-        }""")
-        if not data:
-            raise RuntimeError("YouTube browser player did not expose player response.")
-        details=data.get("videoDetails") or {}
-        duration=float(details.get("lengthSeconds") or 0)
-        streaming=data.get("streamingData") or {}
-        fmts=streaming.get("adaptiveFormats") or []
-        vids=[x for x in fmts if str(x.get("mimeType","")).startswith("video/mp4") and x.get("url")]
-        auds=[x for x in fmts if str(x.get("mimeType","")).startswith("audio/mp4") and x.get("url")]
-        vids=[x for x in vids if int(x.get("height") or 0)<=720] or vids
-        vids.sort(key=lambda x:(int(x.get("height") or 0),int(x.get("bitrate") or 0)),reverse=True)
-        auds.sort(key=lambda x:int(x.get("bitrate") or 0),reverse=True)
-        if not vids or not auds:
-            raise RuntimeError("Browser player did not provide direct MP4 stream URLs.")
 
-        events=[]
-        try:
-            tracks=(((data.get("captions") or {}).get("playerCaptionsTracklistRenderer") or {}).get("captionTracks") or [])
-            if tracks:
-                cap_url=tracks[0].get("baseUrl")
-                if cap_url:
-                    sep="&" if "?" in cap_url else "?"
-                    txt=page.evaluate("""async (u) => { const r=await fetch(u); return await r.text(); }""",cap_url+sep+"fmt=json3")
-                    events=(json.loads(txt) or {}).get("events") or []
-        except Exception:
-            events=[]
+        def on_request(req):
+            u=req.url
+            if "googlevideo.com/videoplayback" in u:
+                media_urls.append(u)
 
-        start=pick_caption_window(events,target,duration or target*3)
-        vurl=vids[0]["url"]; aurl=auds[0]["url"]
+        page.on("request",on_request)
+
+        urls=[
+            f"https://www.youtube.com/watch?v={video_id}",
+            f"https://www.youtube.com/embed/{video_id}?autoplay=1&controls=1&rel=0"
+        ]
+        data=None
+        for url in urls:
+            try:
+                page.goto(url,wait_until="domcontentloaded",timeout=90000)
+                page.wait_for_timeout(7000)
+                # Consent page if present
+                for txt in ["Accept all","Reject all","I agree"]:
+                    try:
+                        page.get_by_text(txt,exact=True).click(timeout=1200)
+                        page.wait_for_timeout(2500)
+                    except Exception:
+                        pass
+                # Start playback if a player exists.
+                try:
+                    page.locator("video").evaluate("(v)=>{v.muted=true; return v.play()}")
+                except Exception:
+                    pass
+                page.wait_for_timeout(8000)
+                data=page.evaluate("""() => {
+                  let p = window.ytInitialPlayerResponse || window.ytplayer?.config?.args?.raw_player_response || window.ytplayer?.config?.args?.player_response;
+                  if (typeof p === 'string') { try { p=JSON.parse(p); } catch(e) {} }
+                  return p || null;
+                }""")
+                if data or media_urls:
+                    break
+            except Exception:
+                continue
+
+        if data:
+            details=data.get("videoDetails") or {}
+            duration=float(details.get("lengthSeconds") or 0)
+            streaming=data.get("streamingData") or {}
+            fmts=streaming.get("adaptiveFormats") or []
+            vids=[x for x in fmts if str(x.get("mimeType","")).startswith("video/mp4") and x.get("url")]
+            auds=[x for x in fmts if str(x.get("mimeType","")).startswith("audio/mp4") and x.get("url")]
+            vids=[x for x in vids if int(x.get("height") or 0)<=720] or vids
+            vids.sort(key=lambda x:(int(x.get("height") or 0),int(x.get("bitrate") or 0)),reverse=True)
+            auds.sort(key=lambda x:int(x.get("bitrate") or 0),reverse=True)
+            if vids and auds:
+                vurl=vids[0]["url"]; aurl=auds[0]["url"]
+                start=max(0,min(duration-target,duration*0.12)) if duration else 0
+                browser.close()
+                raw=outdir/"browser_segment.mp4"
+                headers="User-Agent: Mozilla/5.0\r\nReferer: https://www.youtube.com/\r\n"
+                run(["ffmpeg","-y","-headers",headers,"-ss",f"{start:.2f}","-i",vurl,
+                     "-headers",headers,"-ss",f"{start:.2f}","-i",aurl,
+                     "-t",str(target+3),"-map","0:v:0","-map","1:a:0",
+                     "-c:v","copy","-c:a","aac","-b:a","160k","-movflags","+faststart",str(raw)])
+                return raw,start
+
+        # Last browser fallback: use the media URLs Chromium itself requested.
+        unique=[]
+        for u in media_urls:
+            if u not in unique: unique.append(u)
         browser.close()
+        if unique:
+            # Try media URLs pairwise. muxed URLs may work alone; adaptive URLs need video+audio.
+            raw=outdir/"browser_segment.mp4"
+            headers="User-Agent: Mozilla/5.0\r\nReferer: https://www.youtube.com/\r\n"
+            for u in unique[:8]:
+                try:
+                    run(["ffmpeg","-y","-headers",headers,"-i",u,"-t",str(target+3),
+                         "-c","copy","-movflags","+faststart",str(raw)])
+                    if raw.exists() and raw.stat().st_size>100000:
+                        return raw,0
+                except Exception:
+                    pass
+            for i,u1 in enumerate(unique[:6]):
+                for u2 in unique[i+1:6]:
+                    try:
+                        run(["ffmpeg","-y","-headers",headers,"-i",u1,
+                             "-headers",headers,"-i",u2,"-t",str(target+3),
+                             "-map","0:v:0?","-map","1:a:0?","-c:v","copy","-c:a","aac",
+                             "-movflags","+faststart",str(raw)])
+                        if raw.exists() and raw.stat().st_size>100000:
+                            return raw,0
+                    except Exception:
+                        pass
 
-    raw=outdir/"browser_segment.mp4"
-    headers="User-Agent: Mozilla/5.0\r\nReferer: https://www.youtube.com/\r\n"
-    cmd=["ffmpeg","-y","-headers",headers,"-ss",f"{start:.2f}","-i",vurl,
-         "-headers",headers,"-ss",f"{start:.2f}","-i",aurl,
-         "-t",str(target+3),"-map","0:v:0","-map","1:a:0",
-         "-c:v","copy","-c:a","aac","-b:a","160k","-movflags","+faststart",str(raw)]
-    run(cmd)
-    return raw,start
+        raise RuntimeError("YouTube cloud player did not expose playable media from this datacenter.")
 
 def download_source(url,outdir,target):
     out=outdir/"source.mp4"
