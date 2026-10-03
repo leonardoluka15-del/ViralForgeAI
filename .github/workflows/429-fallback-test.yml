@@ -1,4 +1,5 @@
 name: ViralForge 429 Fallback Test
+# rerun after fast-mode deploy
 
 on:
   workflow_dispatch:
