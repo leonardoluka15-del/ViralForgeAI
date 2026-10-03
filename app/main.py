@@ -3,6 +3,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 import uuid, shutil, threading, urllib.parse, os, secrets
+from datetime import datetime, timezone
 import yt_dlp
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
@@ -133,6 +134,63 @@ def youtube_status():
     except Exception as e:
         base.update({'authorized': False, 'error': str(e)[:240]})
     return base
+
+@app.get('/api/trends')
+def youtube_trends(region: str = 'US', max_results: int = 24):
+    region = (region or 'US').upper()[:2]
+    max_results = max(6, min(int(max_results or 24), 40))
+    try:
+        yt = build('youtube','v3',credentials=youtube_credentials(),cache_discovery=False)
+        resp = yt.videos().list(
+            part='snippet,statistics,contentDetails',
+            chart='mostPopular',
+            regionCode=region,
+            maxResults=max_results
+        ).execute()
+        now = datetime.now(timezone.utc)
+        rows = []
+        for item in resp.get('items',[]):
+            sn = item.get('snippet',{})
+            st = item.get('statistics',{})
+            published = sn.get('publishedAt')
+            try:
+                dt = datetime.fromisoformat(published.replace('Z','+00:00')) if published else now
+                age_hours = max((now-dt).total_seconds()/3600, 0.5)
+            except Exception:
+                age_hours = 24.0
+            views = int(st.get('viewCount') or 0)
+            likes = int(st.get('likeCount') or 0)
+            comments = int(st.get('commentCount') or 0)
+            vph = int(views/age_hours) if age_hours else views
+            engagement = ((likes+comments)/max(views,1))*100
+            title = sn.get('title','')
+            category = sn.get('categoryId','')
+            rows.append({
+                'video_id': item.get('id'),
+                'title': title,
+                'channel': sn.get('channelTitle'),
+                'published_at': published,
+                'age_hours': round(age_hours,1),
+                'views': views,
+                'views_per_hour': vph,
+                'likes': likes,
+                'comments': comments,
+                'engagement_pct': round(engagement,2),
+                'category_id': category,
+                'thumbnail': ((sn.get('thumbnails') or {}).get('high') or (sn.get('thumbnails') or {}).get('medium') or (sn.get('thumbnails') or {}).get('default') or {}).get('url'),
+                'url': f"https://www.youtube.com/watch?v={item.get('id')}",
+            })
+        rows.sort(key=lambda x:(x['views_per_hour'],x['views']),reverse=True)
+        for i,row in enumerate(rows,1):
+            row['rank']=i
+            # heuristic opportunity score, capped 100
+            velocity=min(row['views_per_hour']/50000,1.0)
+            engagement=min(row['engagement_pct']/8.0,1.0)
+            freshness=max(0.0,1.0-min(row['age_hours']/96.0,1.0))
+            row['trend_score']=int(round(100*(0.58*velocity+0.22*engagement+0.20*freshness)))
+        return {'region':region,'count':len(rows),'items':rows}
+    except Exception as e:
+        raise HTTPException(500, f'Trend Scout failed: {str(e)[:300]}')
 
 @app.post('/api/youtube/upload')
 def youtube_upload(
