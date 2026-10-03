@@ -1,0 +1,9 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.12
+requests>=2.32
+faster-whisper>=1.1.0
+imageio-ffmpeg>=0.5.1
+yt-dlp>=2026.1.1
+sqlmodel>=0.0.22
+jinja2>=3.1
